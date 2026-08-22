@@ -1,0 +1,61 @@
+/**
+ * Hardcoded spiritual stories — 5 stories in English & Hindi.
+ */
+
+export const STORIES = [
+  {
+    id: '1',
+    title: 'Why Hanuman Tore His Chest',
+    titleHindi: 'हनुमान ने अपना सीना क्यों चीरा',
+    deity: 'Hanuman',
+    deityHindi: 'हनुमान',
+    body: `After the Lanka war, everyone was distributing gifts to the warriors. Sita Mata offered Hanuman a precious pearl necklace. But Hanuman broke each pearl and looked inside, then threw them away.\n\nWhen asked why, Hanuman said, "These pearls have no value to me because Ram and Sita's names are not written in them."\n\nSomeone challenged him — "Is Ram's name written in your heart?" Hanuman tore open his chest, and there, on every rib and every muscle, were the names of Ram and Sita, glowing brilliantly.\n\nThe court fell silent in awe.`,
+    bodyHindi: `लंका युद्ध के बाद, सभी योद्धाओं को उपहार बांटे जा रहे थे। सीता माता ने हनुमान को एक कीमती मोतियों की माला भेंट की। लेकिन हनुमान ने हर मोती तोड़कर अंदर देखा, फिर फेंक दिया।\n\nपूछने पर हनुमान ने कहा, "इन मोतियों में कोई मूल्य नहीं क्योंकि इनमें राम और सीता का नाम नहीं लिखा।"\n\nकिसी ने चुनौती दी — "क्या तुम्हारे हृदय में राम का नाम है?" हनुमान ने अपना सीना चीर दिया, और वहाँ हर पसली और हर मांसपेशी पर राम-सीता के नाम चमक रहे थे।\n\nदरबार में सन्नाटा छा गया।`,
+    lesson: 'True devotion lives in the heart, not in material things.',
+    lessonHindi: 'सच्ची भक्ति हृदय में होती है, भौतिक वस्तुओं में नहीं।',
+  },
+  {
+    id: '2',
+    title: 'Krishna and the Fruit Seller',
+    titleHindi: 'कृष्ण और फल वाली',
+    deity: 'Krishna',
+    deityHindi: 'कृष्ण',
+    body: `A poor old fruit seller would walk through Vrindavan calling out her fruits. One day, young Krishna ran to her and offered a fistful of grain in exchange for fruits.\n\nThe grain fell from his tiny hands along the way, and by the time he reached her, only a few grains remained. The old woman laughed and filled his hands with fruits anyway.\n\nWhen she returned home, she found her basket full — not of fruits, but of gold and jewels. Krishna had rewarded her pure, unconditional generosity.`,
+    bodyHindi: `एक गरीब बुजुर्ग फल वाली वृंदावन में फल बेचती थी। एक दिन छोटे कृष्ण उसके पास दौड़ते आए और फलों के बदले मुट्ठी भर अनाज दिया।\n\nरास्ते में अनाज उनकी छोटी हथेलियों से गिर गया, और जब वे उस तक पहुँचे तो केवल कुछ दाने बचे थे। बुजुर्ग महिला हँसी और फिर भी उनके हाथ फलों से भर दिए।\n\nघर लौटने पर उसने पाया कि उसकी टोकरी भरी है — फलों से नहीं, बल्कि सोने और जवाहरात से। कृष्ण ने उसकी निःस्वार्थ उदारता का पुरस्कार दिया था।`,
+    lesson: 'Giving with a pure heart always comes back multiplied.',
+    lessonHindi: 'शुद्ध हृदय से दिया गया दान कई गुना होकर लौटता है।',
+  },
+  {
+    id: '3',
+    title: 'The Devotee Who Stopped the River',
+    titleHindi: 'वह भक्त जिसने नदी रोकी',
+    deity: 'Shiva',
+    deityHindi: 'शिव',
+    body: `A simple farmer named Kannappa had no knowledge of scriptures or rituals. But every day, he would hunt animals, wash the meat in the river, and place it on the Shivalinga along with water he carried in his mouth — the only vessels he had.\n\nThe priests were horrified. But Lord Shiva told them: "Kannappa's love for me is purer than all your rituals. He gives me the best of what he has."\n\nWhen Kannappa heard the Shivalinga's eye was bleeding, he gouged out his own eye to replace it — without hesitation.\n\nShiva appeared before him and granted him liberation.`,
+    bodyHindi: `कन्नप्पा नाम का एक साधारण किसान शास्त्रों या अनुष्ठानों से अनजान था। लेकिन हर दिन वह शिकार करता, मांस नदी में धोता, और शिवलिंग पर रखता — पानी वह अपने मुँह में भरकर लाता, क्योंकि उसके पास और कोई बर्तन नहीं था।\n\nपुजारी भयभीत थे। लेकिन भगवान शिव ने उन्हें बताया: "कन्नप्पा का प्रेम तुम्हारे सभी अनुष्ठानों से शुद्ध है। वह मुझे अपना सर्वश्रेष्ठ देता है।"\n\nजब कन्नप्पा ने शिवलिंग की आँख से खून निकलते देखा, तो बिना हिचकिचाए उसने अपनी आँख निकाल दी।\n\nशिव प्रकट हुए और उसे मोक्ष प्रदान किया।`,
+    lesson: 'God values sincerity and love over ritual perfection.',
+    lessonHindi: 'भगवान को अनुष्ठान की पूर्णता से अधिक, निष्ठा और प्रेम प्रिय है।',
+  },
+  {
+    id: '4',
+    title: 'The Story of Sai Baba and the Lame Man',
+    titleHindi: 'साईं बाबा और लंगड़े आदमी की कहानी',
+    deity: 'Sai Baba',
+    deityHindi: 'साईं बाबा',
+    body: `A man who could barely walk had heard of Sai Baba of Shirdi. Despite his condition, he made the long, painful journey to see the saint.\n\nWhen he finally arrived, Sai Baba was distributing food to everyone. The man stood at the edge, too humble to ask for anything.\n\nSai Baba looked at him from across the crowd, walked directly to him, placed food in his hands, and said simply, "I know why you came. Your faith has already healed you."\n\nThe man walked home — not just with food, but without pain for the first time in years.`,
+    bodyHindi: `एक व्यक्ति जो मुश्किल से चल पाता था, उसने शिरडी के साईं बाबा के बारे में सुना था। अपनी स्थिति के बावजूद, वह लंबी, कठिन यात्रा करके संत के पास पहुँचा।\n\nजब वह पहुँचा, साईं बाबा सभी को भोजन वितरित कर रहे थे। वह किनारे खड़ा रहा, कुछ माँगने में बहुत विनम्र।\n\nसाईं बाबा ने भीड़ के पार उसे देखा, सीधे उसके पास गए, उसके हाथों में खाना रखा और बस इतना कहा, "मैं जानता हूँ तुम क्यों आए। तुम्हारे विश्वास ने तुम्हें पहले ही ठीक कर दिया है।"\n\nवह आदमी घर लौटा — भोजन के साथ ही नहीं, बल्कि वर्षों में पहली बार बिना दर्द के।`,
+    lesson: 'Faith, even small and quiet, can move the greatest mountains.',
+    lessonHindi: 'विश्वास, चाहे छोटा और शांत हो, सबसे बड़े पहाड़ों को हिला सकता है।',
+  },
+  {
+    id: '5',
+    title: 'Durga and the Buffalo Demon',
+    titleHindi: 'दुर्गा और महिषासुर',
+    deity: 'Durga',
+    deityHindi: 'दुर्गा',
+    body: `The demon Mahishasura had received a boon that no man or god could kill him. He used this power to conquer the heavens and terrorise the world.\n\nThe gods combined their divine energies and created Goddess Durga — a warrior woman radiating power and grace. Each god gave her their most powerful weapon.\n\nFor nine days and nights, Durga battled Mahishasura. On the tenth day — Vijayadashami — she slew the demon with her trident.\n\nThis is why we celebrate Navratri for nine nights and Dussehra on the tenth — the victory of good over evil.`,
+    bodyHindi: `राक्षस महिषासुर को वरदान था कि कोई पुरुष या देवता उसे नहीं मार सकता। उसने इस शक्ति का उपयोग स्वर्ग जीतने और संसार को आतंकित करने के लिए किया।\n\nदेवताओं ने अपनी दिव्य शक्तियाँ मिलाईं और देवी दुर्गा को प्रकट किया — एक योद्धा स्त्री जो शक्ति और अनुग्रह से दमक रही थी। हर देवता ने उन्हें अपना सबसे शक्तिशाली अस्त्र दिया।\n\nनौ दिन और रातों तक दुर्गा ने महिषासुर से युद्ध किया। दसवें दिन — विजयादशमी पर — उन्होंने त्रिशूल से राक्षस का वध किया।\n\nइसीलिए हम नौ रात नवरात्रि और दसवें दिन दशहरा मनाते हैं — बुराई पर अच्छाई की विजय।`,
+    lesson: 'No evil is too powerful when truth and goodness unite.',
+    lessonHindi: 'जब सच्चाई और अच्छाई एकजुट होती हैं, तो कोई बुराई बहुत बड़ी नहीं होती।',
+  },
+];

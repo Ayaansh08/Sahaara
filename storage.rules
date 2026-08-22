@@ -1,0 +1,14 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // User-specific memories photo storage
+    match /users/{uid}/memories/{allPaths=**} {
+      allow read, write, delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Default deny all other uploads
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

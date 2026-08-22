@@ -1,0 +1,48 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# Dependencies
+node_modules/
+server/node_modules/
+
+# Expo & Web
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro & Logs
+.metro-health-check*
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+*.log
+
+# OS & IDE
+.DS_Store
+*.pem
+.idea/
+.vscode/
+.claude/
+
+# Local Environment Variables (Keep Private!)
+.env*
+server/.env*
+*.env
+
+# Python & Temporary Scratch
+__pycache__/
+*.pyc
+scratch*
+
+# Generated Native Folders
+/ios
+/android
