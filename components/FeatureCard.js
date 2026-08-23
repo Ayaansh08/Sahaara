@@ -13,7 +13,7 @@ export default function FeatureCard({ title, subtitle, iconName, onPress }) {
       accessibilityLabel={`${title}, ${subtitle}`}
     >
       <View style={styles.iconContainer}>
-        <Ionicons name={iconName} size={32} color={COLORS.primary} />
+        <Ionicons name={iconName} size={SIZES.iconLarge} color={COLORS.primary} />
       </View>
       <Text style={styles.title} numberOfLines={1}>
         {title}
@@ -32,7 +32,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
     borderRadius: SIZES.cardRadius,
     padding: SPACING.md,
-    margin: 6,
+    margin: SPACING.xs,
     borderWidth: 1.5,
     borderColor: COLORS.border,
     shadowColor: COLORS.textPrimary,
@@ -50,7 +50,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primaryLight,
     justifyContent: 'center',
     alignItems: 'center',
-    marginBottom: 12,
+    marginBottom: SPACING.sm + 2,
   },
   title: {
     fontSize: 20,

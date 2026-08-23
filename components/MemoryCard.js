@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import {
-  View, Text, TouchableOpacity, StyleSheet, Image,
+  View, Text, TouchableOpacity, StyleSheet, Image, ActivityIndicator,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -77,11 +77,23 @@ export default function MemoryCard() {
     }
   };
 
+  if (loading) {
+    return (
+      <View style={styles.card}>
+        <View style={styles.loadingContent}>
+          <ActivityIndicator size="small" color={COLORS.primary} />
+          <Text style={styles.loadingText}>{t('memory.heading')}</Text>
+        </View>
+      </View>
+    );
+  }
+
   return (
     <TouchableOpacity
       style={styles.card}
       onPress={handlePress}
       activeOpacity={0.85}
+      accessibilityRole="button"
     >
       {/* Header */}
       <View style={styles.headerRow}>
@@ -161,4 +173,15 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: '#E8D8C8', paddingTop: 12, gap: 6,
   },
   footerText: { fontSize: 14, fontWeight: '700', color: COLORS.primary },
+  loadingContent: {
+    minHeight: 86,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.textSecondary,
+    marginTop: SPACING.sm,
+  },
 });

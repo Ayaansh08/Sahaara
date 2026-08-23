@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, SPACING } from '../constants/theme';
+import { COLORS, SIZES, SPACING } from '../constants/theme';
 
 export default function SectionHeading({ title, iconName, iconColor }) {
   return (
@@ -9,7 +9,7 @@ export default function SectionHeading({ title, iconName, iconColor }) {
       {iconName && (
         <Ionicons
           name={iconName}
-          size={24}
+          size={SIZES.iconNormal}
           color={iconColor || COLORS.primary}
           style={styles.icon}
         />
@@ -25,15 +25,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginTop: SPACING.lg,
     marginBottom: SPACING.md,
-    paddingHorizontal: 4,
+    paddingHorizontal: SPACING.xs,
   },
   icon: {
-    marginRight: 10,
+    marginRight: SPACING.sm,
   },
   title: {
     fontSize: 22,
     fontWeight: '800',
     color: COLORS.textPrimary,
-    letterSpacing: 0.2,
+    letterSpacing: 0,
   },
 });

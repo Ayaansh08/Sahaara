@@ -207,6 +207,7 @@ export default function SaathiChatScreen() {
           <TouchableOpacity
             onPress={() => router.back()}
             style={styles.backBtn}
+            activeOpacity={0.8}
             accessibilityRole="button"
             accessibilityLabel="Go back"
           >
@@ -391,9 +392,9 @@ const styles = StyleSheet.create({
     borderWidth: 1.5,
     borderColor: COLORS.border,
     shadowColor: COLORS.textPrimary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.04,
-    shadowRadius: 5,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05,
+    shadowRadius: 6,
     elevation: 2,
   },
   welcomeAvatar: {
@@ -442,9 +443,10 @@ const styles = StyleSheet.create({
     borderRadius: 18,
     elevation: 1,
     shadowColor: COLORS.textPrimary,
-    shadowOffset: { width: 0, height: 1 },
+    shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
-    shadowRadius: 3,
+    shadowRadius: 4,
+    elevation: 2,
   },
   bubbleUser: {
     backgroundColor: COLORS.primary,
@@ -485,7 +487,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: SPACING.md,
-    paddingTop: 10,
+    paddingTop: SPACING.sm,
     backgroundColor: COLORS.surface,
     borderTopWidth: 1.5,
     borderTopColor: COLORS.border,

@@ -140,6 +140,7 @@ export default function AddMemoryScreen() {
           <TouchableOpacity
             onPress={() => router.back()}
             style={styles.backBtn}
+            activeOpacity={0.8}
             accessibilityRole="button"
             accessibilityLabel="Go back"
           >
@@ -282,8 +283,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
   },
   backBtn: {
-    padding: 6,
-    marginRight: 12,
+    padding: SPACING.xs,
+    marginRight: SPACING.sm + 2,
   },
   headerTitle: {
     fontSize: 22,

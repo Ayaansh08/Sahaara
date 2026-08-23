@@ -68,7 +68,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: SPACING.lg,
-    paddingVertical: 14,
+    paddingVertical: SPACING.md - 2,
     width: '100%',
     marginVertical: SPACING.sm,
     shadowColor: COLORS.primary,
@@ -95,7 +95,7 @@ const styles = StyleSheet.create({
   buttonText: {
     fontSize: 20,
     fontWeight: '700',
-    letterSpacing: 0.4,
+    letterSpacing: 0,
   },
   textPrimary: {
     color: COLORS.textOnPrimary,

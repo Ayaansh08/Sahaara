@@ -25,6 +25,7 @@ import MemoryCard from '../../components/MemoryCard';
 import WellnessCard from '../../components/WellnessCard';
 import SosButton from '../../components/SosButton';
 import LanguageToggle from '../../components/LanguageToggle';
+import SahaaraLogo from '../../components/SahaaraLogo';
 import { transliterateName } from '../../services/saathiService';
 
 export default function HomeScreen() {
@@ -183,8 +184,10 @@ export default function HomeScreen() {
                     await AsyncStorage.setItem(`@sahaara_city_prompted_${user.uid}`, 'skipped');
                   }
                   setShowCityPrompt(false);
-                }}
-              >
+              }}
+              activeOpacity={0.8}
+              accessibilityRole="button"
+            >
                 <Text style={styles.citySkipText}>
                   {isHindi ? 'अभी नहीं' : 'Skip'}
                 </Text>
@@ -193,6 +196,8 @@ export default function HomeScreen() {
                 style={styles.citySaveBtn}
                 onPress={saveCity}
                 disabled={savingCity}
+                activeOpacity={0.8}
+                accessibilityRole="button"
               >
                 <Text style={styles.citySaveText}>
                   {savingCity
@@ -212,29 +217,30 @@ export default function HomeScreen() {
         ]}
         showsVerticalScrollIndicator={false}
       >
-        {/* 1. Header (Greeting, Language Toggle & Avatar) */}
+        {/* 1. Header (Logo, Greeting, Language Toggle & Avatar) */}
         <View style={styles.headerRow}>
-          {/* Left: Greeting */}
-          <View style={styles.headerLeft}>
+          <View style={styles.headerTopRow}>
+            <SahaaraLogo showTagline={false} size={58} compact />
+            <View style={styles.headerRight}>
+              <LanguageToggle />
+              <TouchableOpacity
+                style={styles.avatarButton}
+                onPress={() => router.push('/profile')}
+                activeOpacity={0.8}
+                accessibilityRole="button"
+                accessibilityLabel="Open Profile"
+              >
+                <Ionicons name="person" size={24} color={COLORS.primary} />
+              </TouchableOpacity>
+            </View>
+          </View>
+
+          <View style={styles.headerGreeting}>
             <Text style={styles.greetingTitle}>
               {greeting}
             </Text>
             <Text style={styles.dateText}>{formattedDate}</Text>
             <Text style={styles.subGreeting}>{t('home.subGreeting')}</Text>
-          </View>
-
-          {/* Right: Language Toggle + Profile Avatar */}
-          <View style={styles.headerRight}>
-            <LanguageToggle />
-            <TouchableOpacity
-              style={styles.avatarButton}
-              onPress={() => router.push('/profile')}
-              activeOpacity={0.8}
-              accessibilityRole="button"
-              accessibilityLabel="Open Profile"
-            >
-              <Ionicons name="person" size={24} color={COLORS.primary} />
-            </TouchableOpacity>
           </View>
         </View>
 
@@ -357,21 +363,23 @@ const styles = StyleSheet.create({
 
   // 1. Header
   headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
     marginBottom: SPACING.md,
     paddingHorizontal: 4,
   },
-  headerLeft: {
-    flex: 1,
-    paddingRight: 8,
+  headerTopRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+  },
+  headerGreeting: {
+    paddingRight: SPACING.sm,
   },
   greetingTitle: {
-    fontSize: 26,
+    fontSize: 24,
     fontWeight: '800',
     color: COLORS.textPrimary,
-    letterSpacing: 0.2,
+    letterSpacing: 0,
+    marginTop: SPACING.xs,
   },
   dateText: {
     fontSize: 15,
@@ -390,15 +398,15 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   avatarButton: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 52,
+    height: 52,
+    borderRadius: 26,
     backgroundColor: COLORS.primaryLight,
     borderWidth: 2,
     borderColor: '#E5D5C5',
     justifyContent: 'center',
     alignItems: 'center',
-    marginLeft: 10,
+    marginLeft: SPACING.sm,
     shadowColor: COLORS.primary,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.1,
@@ -420,14 +428,14 @@ const styles = StyleSheet.create({
   },
   heroBadgeRow: {
     flexDirection: 'row',
-    marginBottom: 12,
+    marginBottom: SPACING.sm,
   },
   heroBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(255, 255, 255, 0.22)',
-    paddingHorizontal: 12,
-    paddingVertical: 4,
+    paddingHorizontal: SPACING.sm + 2,
+    paddingVertical: SPACING.xs,
     borderRadius: 16,
   },
   heroBadgeText: {
@@ -435,7 +443,7 @@ const styles = StyleSheet.create({
     fontWeight: '800',
     color: COLORS.textOnPrimary,
     marginLeft: 6,
-    letterSpacing: 1,
+    letterSpacing: 0,
   },
   heroPromptTitle: {
     fontSize: 24,
@@ -502,39 +510,39 @@ const styles = StyleSheet.create({
   // City Prompt Modal
   modalOverlay: {
     flex: 1, backgroundColor: 'rgba(0,0,0,0.45)',
-    justifyContent: 'center', alignItems: 'center', padding: 24,
+    justifyContent: 'center', alignItems: 'center', padding: SPACING.lg,
   },
   cityModal: {
-    backgroundColor: COLORS.surface, borderRadius: 20,
-    padding: 24, width: '100%',
-    shadowColor: '#000', shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15, shadowRadius: 12, elevation: 10,
+    backgroundColor: COLORS.surface, borderRadius: SIZES.cardRadius,
+    padding: SPACING.lg, width: '100%',
+    shadowColor: COLORS.textPrimary, shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.07, shadowRadius: 8, elevation: 3,
   },
-  cityModalIcon: { alignItems: 'center', marginBottom: 12 },
+  cityModalIcon: { alignItems: 'center', marginBottom: SPACING.sm + 2 },
   cityModalTitle: {
     fontSize: 20, fontWeight: '800', color: COLORS.textPrimary,
-    textAlign: 'center', marginBottom: 8,
+    textAlign: 'center', marginBottom: SPACING.sm,
   },
   cityModalSub: {
     fontSize: 14, color: COLORS.textSecondary, textAlign: 'center',
-    lineHeight: 20, marginBottom: 18,
+    lineHeight: 20, marginBottom: SPACING.md + 2,
   },
   cityInput: {
     borderWidth: 1.5, borderColor: COLORS.border,
-    borderRadius: 12, paddingHorizontal: 14, paddingVertical: 12,
+    borderRadius: SIZES.inputRadius, paddingHorizontal: SPACING.md, paddingVertical: SPACING.sm + 2,
     fontSize: 16, color: COLORS.textPrimary,
-    backgroundColor: COLORS.background, marginBottom: 18,
+    backgroundColor: COLORS.background, marginBottom: SPACING.md + 2,
   },
-  cityModalBtns: { flexDirection: 'row', gap: 10 },
+  cityModalBtns: { flexDirection: 'row', gap: SPACING.sm },
   citySkipBtn: {
-    flex: 1, paddingVertical: 13, borderRadius: 12,
+    flex: 1, minHeight: SIZES.minTouchHeight, borderRadius: SIZES.buttonRadius,
     borderWidth: 1.5, borderColor: COLORS.border,
-    alignItems: 'center',
+    alignItems: 'center', justifyContent: 'center',
   },
   citySkipText: { fontSize: 15, fontWeight: '700', color: COLORS.textSecondary },
   citySaveBtn: {
-    flex: 1, paddingVertical: 13, borderRadius: 12,
-    backgroundColor: COLORS.primary, alignItems: 'center',
+    flex: 1, minHeight: SIZES.minTouchHeight, borderRadius: SIZES.buttonRadius,
+    backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center',
   },
-  citySaveText: { fontSize: 15, fontWeight: '700', color: '#fff' },
+  citySaveText: { fontSize: 15, fontWeight: '700', color: COLORS.textOnPrimary },
 });

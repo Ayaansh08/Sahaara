@@ -267,7 +267,7 @@ export default function YaadeinScreen() {
 
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backBtn} activeOpacity={0.8}>
           <Ionicons name="arrow-back" size={24} color={COLORS.textPrimary} />
         </TouchableOpacity>
         <View style={{ flex: 1 }}>
@@ -282,6 +282,7 @@ export default function YaadeinScreen() {
           <TouchableOpacity
             style={styles.addBtn}
             onPress={() => { setEditingMemory(null); setForm(emptyForm); setShowAddModal(true); }}
+            activeOpacity={0.82}
           >
             <Ionicons name="add" size={22} color="#fff" />
           </TouchableOpacity>
@@ -299,7 +300,7 @@ export default function YaadeinScreen() {
           onChangeText={setSearchQuery}
         />
         {searchQuery.length > 0 && (
-          <TouchableOpacity onPress={() => setSearchQuery('')}>
+          <TouchableOpacity onPress={() => setSearchQuery('')} activeOpacity={0.8}>
             <Ionicons name="close-circle" size={18} color={COLORS.textLight} />
           </TouchableOpacity>
         )}
@@ -307,7 +308,7 @@ export default function YaadeinScreen() {
 
       {/* Category chips with arrows */}
       <View style={styles.chipRow}>
-        <TouchableOpacity style={styles.chipArrow} onPress={() => scrollChips(-1)}>
+        <TouchableOpacity style={styles.chipArrow} onPress={() => scrollChips(-1)} activeOpacity={0.8}>
           <Ionicons name="chevron-back" size={17} color={COLORS.textSecondary} />
         </TouchableOpacity>
         <ScrollView
@@ -329,7 +330,7 @@ export default function YaadeinScreen() {
             />
           ))}
         </ScrollView>
-        <TouchableOpacity style={styles.chipArrow} onPress={() => scrollChips(1)}>
+        <TouchableOpacity style={styles.chipArrow} onPress={() => scrollChips(1)} activeOpacity={0.8}>
           <Ionicons name="chevron-forward" size={17} color={COLORS.textSecondary} />
         </TouchableOpacity>
       </View>
@@ -605,13 +606,13 @@ function DetailModal({ memory, isHindi, getCatLabel, onClose, onEdit, onDelete }
                   <Text style={styles.catBadgeText}>{getCatLabel(memory.category)}</Text>
                 </View>
                 <View style={{ flexDirection: 'row', gap: 8 }}>
-                  <TouchableOpacity style={styles.actionBtn} onPress={onEdit}>
+                  <TouchableOpacity style={styles.actionBtn} onPress={onEdit} activeOpacity={0.8}>
                     <Ionicons name="create-outline" size={19} color={COLORS.primary} />
                   </TouchableOpacity>
-                  <TouchableOpacity style={[styles.actionBtn, { borderColor: COLORS.error }]} onPress={onDelete}>
+                  <TouchableOpacity style={[styles.actionBtn, { borderColor: COLORS.error }]} onPress={onDelete} activeOpacity={0.8}>
                     <Ionicons name="trash-outline" size={19} color={COLORS.error} />
                   </TouchableOpacity>
-                  <TouchableOpacity style={styles.actionBtn} onPress={onClose}>
+                  <TouchableOpacity style={styles.actionBtn} onPress={onClose} activeOpacity={0.8}>
                     <Ionicons name="close" size={19} color={COLORS.textSecondary} />
                   </TouchableOpacity>
                 </View>
@@ -674,7 +675,7 @@ function AddEditModal({ visible, isEdit, form, setForm, isHindi, onPickPhoto, on
               <Text style={styles.formTitle}>
                 {isEdit ? (isHindi ? 'याद संपादित करें' : 'Edit Memory') : (isHindi ? 'नई याद जोड़ें' : 'Add New Memory')}
               </Text>
-              <TouchableOpacity onPress={onClose}>
+              <TouchableOpacity onPress={onClose} activeOpacity={0.8}>
                 <Ionicons name="close" size={24} color={COLORS.textSecondary} />
               </TouchableOpacity>
             </View>
@@ -687,12 +688,12 @@ function AddEditModal({ visible, isEdit, form, setForm, isHindi, onPickPhoto, on
                 {(form.photos || []).map((uri, i) => (
                   <View key={i} style={styles.photoThumbWrap}>
                     <Image source={{ uri }} style={styles.photoThumb} resizeMode="cover" />
-                    <TouchableOpacity style={styles.photoRemoveBtn} onPress={() => onRemovePhoto(i)}>
+                    <TouchableOpacity style={styles.photoRemoveBtn} onPress={() => onRemovePhoto(i)} activeOpacity={0.8}>
                       <Ionicons name="close-circle" size={20} color="#fff" />
                     </TouchableOpacity>
                   </View>
                 ))}
-                <TouchableOpacity style={styles.photoAddThumb} onPress={onPickPhoto}>
+                <TouchableOpacity style={styles.photoAddThumb} onPress={onPickPhoto} activeOpacity={0.8}>
                   <Ionicons name="camera-outline" size={26} color={COLORS.primary} />
                   <Text style={styles.photoAddText}>{isHindi ? 'जोड़ें' : 'Add'}</Text>
                 </TouchableOpacity>
@@ -708,6 +709,7 @@ function AddEditModal({ visible, isEdit, form, setForm, isHindi, onPickPhoto, on
                       key={cat.id}
                       style={[styles.chip, sel && styles.chipActive, { marginRight: 8 }]}
                       onPress={() => f('category', cat.id)}
+                      activeOpacity={0.85}
                     >
                       <Ionicons name={cat.icon} size={13} color={sel ? '#fff' : COLORS.textSecondary} style={{ marginRight: 4 }} />
                       <Text style={[styles.chipText, sel && styles.chipTextActive]}>
@@ -744,7 +746,7 @@ function AddEditModal({ visible, isEdit, form, setForm, isHindi, onPickPhoto, on
                 placeholder={isHindi ? 'जैसे: रोहन, जयपुर, दादी' : 'e.g. Rohan, Jaipur, Dadi'}
                 placeholderTextColor={COLORS.textLight} />
 
-              <TouchableOpacity style={styles.saveBtn} onPress={onSave}>
+              <TouchableOpacity style={styles.saveBtn} onPress={onSave} activeOpacity={0.82}>
                 <Ionicons name="checkmark-circle-outline" size={22} color="#fff" />
                 <Text style={styles.saveBtnText}>{isHindi ? 'सहेजें' : 'Save Memory'}</Text>
               </TouchableOpacity>
@@ -764,11 +766,11 @@ const styles = StyleSheet.create({
   // Header
   header: {
     flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: SPACING.md, paddingVertical: 12,
+    paddingHorizontal: SPACING.md, paddingVertical: SPACING.sm + 2,
     backgroundColor: COLORS.surface,
     borderBottomWidth: 1, borderBottomColor: COLORS.border,
   },
-  backBtn:    { padding: 6, marginRight: 12 },
+  backBtn:    { padding: SPACING.xs, marginRight: SPACING.sm + 2 },
   headerTitle:{ fontSize: 20, fontWeight: '800', color: COLORS.textPrimary },
   headerSub:  { fontSize: 12, color: COLORS.textSecondary, marginTop: 1 },
   addBtnGlow: {
@@ -786,7 +788,7 @@ const styles = StyleSheet.create({
     margin: SPACING.md, marginBottom: 0,
     backgroundColor: COLORS.surface,
     borderRadius: 14, borderWidth: 1, borderColor: COLORS.border,
-    paddingHorizontal: 14, paddingVertical: 10,
+    paddingHorizontal: SPACING.md - 2, paddingVertical: SPACING.sm,
   },
   searchInput: { flex: 1, fontSize: 15, color: COLORS.textPrimary },
 
@@ -841,10 +843,10 @@ const styles = StyleSheet.create({
 
   // Memory Card
   card: {
-    backgroundColor: COLORS.surface, borderRadius: 20, marginBottom: 16,
+    backgroundColor: COLORS.surface, borderRadius: SIZES.cardRadius, marginBottom: SPACING.md,
     overflow: 'hidden', borderWidth: 1, borderColor: COLORS.border,
-    shadowColor: '#3E2723', shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.07, shadowRadius: 8, elevation: 3,
+    shadowColor: COLORS.textPrimary, shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.05, shadowRadius: 6, elevation: 2,
   },
   cardPhoto: { width: '100%', height: 185 },
   cardPhotoPlaceholder: {
@@ -855,7 +857,7 @@ const styles = StyleSheet.create({
   catBadge: { position: 'absolute', top: 12, left: 12, paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
   catBadgeInline: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
   catBadgeText: { fontSize: 11, fontWeight: '800', color: '#fff', textTransform: 'uppercase', letterSpacing: 0.5 },
-  cardBody: { padding: 14 },
+  cardBody: { padding: SPACING.md - 2 },
   cardTitle: { fontSize: 17, fontWeight: '800', color: COLORS.textPrimary, marginBottom: 4 },
   metaRow:  { flexDirection: 'row', alignItems: 'center', gap: 5, marginBottom: 6 },
   metaText: { fontSize: 12, color: COLORS.textLight, fontWeight: '500' },
@@ -887,7 +889,7 @@ const styles = StyleSheet.create({
   detailTopRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12 },
   actionBtn: {
     borderWidth: 1, borderColor: COLORS.border, borderRadius: 10,
-    padding: 8, backgroundColor: COLORS.background,
+    padding: SPACING.sm - 2, backgroundColor: COLORS.background,
   },
   detailTitle: { fontSize: 22, fontWeight: '900', color: COLORS.textPrimary, marginBottom: 6, lineHeight: 28 },
   divider:     { height: 1, backgroundColor: COLORS.border, marginVertical: 14 },
@@ -895,7 +897,7 @@ const styles = StyleSheet.create({
   detailText:  { fontSize: 15, color: COLORS.textPrimary, lineHeight: 23 },
   storyBox: {
     borderLeftWidth: 3, paddingLeft: 14,
-    backgroundColor: COLORS.primaryLight, borderRadius: 8, padding: 14,
+    backgroundColor: COLORS.primaryLight, borderRadius: 8, padding: SPACING.md - 2,
   },
   storyText: { fontSize: 14, color: COLORS.textSecondary, lineHeight: 22, fontStyle: 'italic' },
 
@@ -939,7 +941,8 @@ const styles = StyleSheet.create({
 
   saveBtn: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 10,
-    backgroundColor: COLORS.primary, borderRadius: 16, paddingVertical: 16, marginTop: 8,
+    backgroundColor: COLORS.primary, borderRadius: SIZES.buttonRadius,
+    minHeight: SIZES.minTouchHeight, marginTop: SPACING.sm,
   },
   saveBtnText: { fontSize: 16, fontWeight: '800', color: '#fff' },
 });

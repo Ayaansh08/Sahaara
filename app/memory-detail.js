@@ -146,6 +146,7 @@ export default function MemoryDetailScreen() {
         <StatusBar barStyle="dark-content" backgroundColor={COLORS.background} />
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>{t('memory.galleryTitle')}</Text>
         </View>
       </SafeAreaView>
     );
@@ -159,6 +160,7 @@ export default function MemoryDetailScreen() {
           <TouchableOpacity
             onPress={() => router.back()}
             style={styles.backBtn}
+            activeOpacity={0.8}
             accessibilityRole="button"
             accessibilityLabel="Go back"
           >
@@ -182,6 +184,7 @@ export default function MemoryDetailScreen() {
         <TouchableOpacity
           onPress={() => router.back()}
           style={styles.backBtn}
+          activeOpacity={0.8}
           accessibilityRole="button"
           accessibilityLabel="Go back"
         >
@@ -196,6 +199,7 @@ export default function MemoryDetailScreen() {
           onPress={handleEdit}
           style={styles.headerIconBtn}
           disabled={deleting}
+          activeOpacity={0.8}
           accessibilityRole="button"
           accessibilityLabel={t('memory.editButton')}
         >
@@ -205,6 +209,7 @@ export default function MemoryDetailScreen() {
           onPress={handleDelete}
           style={styles.headerIconBtn}
           disabled={deleting}
+          activeOpacity={0.8}
           accessibilityRole="button"
           accessibilityLabel={t('memory.deleteButton')}
         >
@@ -287,8 +292,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
   },
   backBtn: {
-    padding: 6,
-    marginRight: 8,
+    padding: SPACING.xs,
+    marginRight: SPACING.sm,
   },
   headerTitle: {
     fontSize: 18,
@@ -296,8 +301,8 @@ const styles = StyleSheet.create({
     color: COLORS.textPrimary,
   },
   headerIconBtn: {
-    padding: 8,
-    marginLeft: 8,
+    padding: SPACING.sm,
+    marginLeft: SPACING.xs,
   },
   centerContainer: {
     flex: 1,
@@ -309,6 +314,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.textSecondary,
+  },
+  loadingText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.textSecondary,
+    marginTop: SPACING.sm,
   },
   scrollContent: {
     paddingBottom: SPACING.xl,
@@ -340,7 +351,7 @@ const styles = StyleSheet.create({
     shadowColor: COLORS.textPrimary,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.05,
-    shadowRadius: 4,
+    shadowRadius: 6,
     elevation: 2,
   },
   infoHeader: {

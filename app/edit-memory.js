@@ -173,6 +173,7 @@ export default function EditMemoryScreen() {
       <SafeAreaView style={styles.safeArea}>
         <View style={styles.centerContainer}>
           <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>{t('memory.galleryTitle')}</Text>
         </View>
       </SafeAreaView>
     );
@@ -192,6 +193,7 @@ export default function EditMemoryScreen() {
           <TouchableOpacity
             onPress={() => router.back()}
             style={styles.backBtn}
+            activeOpacity={0.8}
             accessibilityRole="button"
             accessibilityLabel="Go back"
           >
@@ -328,6 +330,13 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: SPACING.xl,
+  },
+  loadingText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: COLORS.textSecondary,
+    marginTop: SPACING.sm,
   },
   header: {
     flexDirection: 'row',
@@ -339,8 +348,8 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.surface,
   },
   backBtn: {
-    padding: 6,
-    marginRight: 12,
+    padding: SPACING.xs,
+    marginRight: SPACING.sm + 2,
   },
   headerTitle: {
     fontSize: 22,
