@@ -16,20 +16,29 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
 import * as Notifications from 'expo-notifications';
+import Constants from 'expo-constants';
 import { addDoc, collection, serverTimestamp } from 'firebase/firestore';
 import { db, auth } from '../firebase/config';
 import { useTranslation } from '../context/LanguageContext';
 import { COLORS, SIZES, SPACING } from '../constants/theme';
 import { SOS_CONFIG } from '../constants/sosConfig';
 
-// Configure notification handler
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-  }),
-});
+// Check if running in Expo Go
+const isExpoGo = Constants.appOwnership === 'expo';
+
+// Configure notification handler (safely handle Expo Go limitations)
+try {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+    }),
+  });
+} catch (e) {
+  // Notification setup failed (expected in Expo Go)
+  console.log('[SOS] Notifications unavailable in Expo Go');
+}
 
 export default function SosButton() {
   const { t, language } = useTranslation();
@@ -53,9 +62,11 @@ export default function SosButton() {
     ).start();
   }, []);
 
-  // Request notification permission on mount
+  // Request notification permission on mount (skip in Expo Go)
   useEffect(() => {
-    Notifications.requestPermissionsAsync().catch(() => {});
+    if (!isExpoGo) {
+      Notifications.requestPermissionsAsync().catch(() => {});
+    }
   }, []);
 
   const handleSosPress = () => {
@@ -161,21 +172,25 @@ export default function SosButton() {
     }
 
     // ── Step 3: Local push notification ───────────────────────────────────────
-    try {
-      await Notifications.scheduleNotificationAsync({
-        content: {
-          title: isHindi ? '🆘 SOS अलर्ट भेजा गया' : '🆘 SOS Alert Sent',
-          body: coords
-            ? (isHindi
-                ? `आपका स्थान (${coords.latitude.toFixed(4)}, ${coords.longitude.toFixed(4)}) देखभालकर्ता को भेजा गया।`
-                : `Your location sent to caretaker. Stay calm, help is coming.`)
-            : (isHindi ? 'देखभालकर्ता को सूचित किया गया।' : 'Caretaker has been notified.'),
-          sound: true,
-          priority: Notifications.AndroidNotificationPriority.MAX,
-        },
-        trigger: null, // fire immediately
-      });
-    } catch (_) {}
+    if (!isExpoGo) {
+      try {
+        await Notifications.scheduleNotificationAsync({
+          content: {
+            title: isHindi ? '🆘 SOS अलर्ट भेजा गया' : '🆘 SOS Alert Sent',
+            body: coords
+              ? (isHindi
+                  ? `आपका स्थान (${coords.latitude.toFixed(4)}, ${coords.longitude.toFixed(4)}) देखभालकर्ता को भेजा गया।`
+                  : `Your location sent to caretaker. Stay calm, help is coming.`)
+              : (isHindi ? 'देखभालकर्ता को सूचित किया गया।' : 'Caretaker has been notified.'),
+            sound: true,
+            priority: Notifications.AndroidNotificationPriority.MAX,
+          },
+          trigger: null, // fire immediately
+        });
+      } catch (_) {
+        console.log('[SOS] Notification scheduling failed (development/Expo Go limitation)');
+      }
+    }
 
     setLoading(false);
     setStep('done');

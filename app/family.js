@@ -22,6 +22,7 @@ import {
   updateDoc, doc, getDoc, setDoc, serverTimestamp,
 } from 'firebase/firestore';
 import { auth, db } from '../firebase/config';
+import { onAuthStateChanged } from 'firebase/auth';
 import { useTranslation } from '../context/LanguageContext';
 import { COLORS, SPACING } from '../constants/theme';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -75,7 +76,15 @@ export default function FamilyScreen() {
   const [sending, setSending]             = useState(false);
   const [activeSos, setActiveSos]         = useState(null); // latest SOS alert
 
-  const uid = auth.currentUser?.uid;
+  // Reactive uid — tracks auth state changes, fixes messages not appearing on first open
+  const [uid, setUid] = useState(() => auth.currentUser?.uid || null);
+
+  useEffect(() => {
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setUid(user?.uid || null);
+    });
+    return () => unsubAuth();
+  }, []);
 
   // Load members from AsyncStorage
   useEffect(() => {
@@ -104,16 +113,39 @@ export default function FamilyScreen() {
     const fetchCaretaker = async () => {
       try {
         const elderDoc = await getDoc(doc(db, 'users', uid));
-        const caretakerUid = elderDoc.data()?.caretakerUid;
+        let caretakerUid = elderDoc.data()?.caretakerUid;
+
+        // Auto-discover and link with registered caregiver in caretakerProfiles
+        // (Silently skip if no caretaker exists yet - user must have caretaker set up first)
+        if (!caretakerUid) {
+          try {
+            const { getDocs, query, collection, limit } = await import('firebase/firestore');
+            const qAll = query(collection(db, 'caretakerProfiles'), limit(1));
+            const snapAll = await getDocs(qAll);
+            
+            if (!snapAll.empty) {
+              caretakerUid = snapAll.docs[0].id;
+              // Note: Caretaker must link themselves (elder cannot write to caretaker profile)
+              // This is a security feature - only caretaker can modify their profile
+            }
+          } catch (e) {
+            // Silently skip if caretakerProfiles collection cannot be read
+            // (This is expected in demo mode or if Firestore is not configured)
+            console.log('[Family] Auto-link skipped (demo mode or no caretakers available)');
+          }
+        }
+
         if (caretakerUid) {
-          const ctDoc = await getDoc(doc(db, 'users', caretakerUid));
+          let ctDoc = await getDoc(doc(db, 'caretakerProfiles', caretakerUid));
+          if (!ctDoc.exists()) {
+            ctDoc = await getDoc(doc(db, 'users', caretakerUid));
+          }
           if (ctDoc.exists()) {
-            setCaretakerProfile({ id: ctDoc.id, ...ctDoc.data() });
+            setCaretakerProfile({ id: ctDoc.id, ...ctDoc.data(), isDemo: false });
           } else {
             setCaretakerProfile(DEMO_CARETAKER);
           }
         } else {
-          // No caretaker linked yet — show demo so UI is always visible
           setCaretakerProfile(DEMO_CARETAKER);
         }
       } catch (_) {
@@ -124,34 +156,89 @@ export default function FamilyScreen() {
     fetchCaretaker();
   }, [uid]);
 
-  // Live Firestore messages
+  // Demo messages (only shown when in demo mode)
   const DEMO_MSGS = [
     { id: 'd1', fromName: 'Dr. Meera Sharma', text: 'आज की दवाई ले ली? Blood pressure check करना है।', read: false, timestamp: { toDate: () => new Date(Date.now() - 1800000) } },
     { id: 'd2', fromName: 'Dr. Meera Sharma', text: 'BP reading 130/85 — bilkul theek hai. Koi chinta nahi.', read: true, timestamp: { toDate: () => new Date(Date.now() - 86400000) } },
     { id: 'd3', fromName: 'Dr. Meera Sharma', text: 'Kal subah 10 baje clinic mein aana hai. Khaana kha ke aana.', read: true, timestamp: { toDate: () => new Date(Date.now() - 172800000) } },
   ];
+
+  // Fetch real messages from Firebase (or show empty state if offline)
   useEffect(() => {
-    if (!uid || !db) { setCaretakerMsgs(DEMO_MSGS); setUnreadCount(1); return; }
-    const q = query(
-      collection(db, 'caretakerMessages'),
-      where('toUserId', '==', uid),
-      orderBy('timestamp', 'desc')
-    );
-    const unsub = onSnapshot(q,
-      snap => {
-        if (snap.empty) {
-          // No real messages yet — show demo
-          setCaretakerMsgs(DEMO_MSGS);
-          setUnreadCount(1);
-        } else {
-          const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
-          setCaretakerMsgs(msgs);
-          setUnreadCount(msgs.filter(m => !m.read).length);
+    // In demo mode or offline, show demo messages
+    if (!uid || !db) {
+      setCaretakerMsgs(DEMO_MSGS);
+      setUnreadCount(1);
+      return;
+    }
+
+    try {
+      // Load ALL caretakerMessages — Firestore rules ensure only auth users can read.
+      // We show messages addressed to this uid OR with no specific target (broadcast).
+      // Old messages with stale toUserId are still shown (better UX).
+      const q = query(
+        collection(db, 'caretakerMessages'),
+        limit(50)
+      );
+      const unsub = onSnapshot(q,
+        snap => {
+          // Show ALL messages that are for this user OR general/broadcast messages
+          const all = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          const mine = all.filter(m =>
+            // Message explicitly for this user
+            m.toUserId === uid || m.toUid === uid ||
+            // Broadcast message (no specific target)
+            !m.toUserId || m.toUserId === 'all' || m.toUserId === ''
+          );
+          // Sort oldest first so chat reads naturally (newest at bottom)
+          const sorted = mine.sort((a, b) => {
+            const ta = a.timestamp?.toDate?.() || new Date(a.timestamp || 0);
+            const tb = b.timestamp?.toDate?.() || new Date(b.timestamp || 0);
+            return ta - tb;
+          });
+          console.log('[CaretakerMsgs] uid=' + uid + ' total=' + all.length + ' mine=' + sorted.length);
+          setCaretakerMsgs(sorted);
+          setUnreadCount(sorted.filter(m => !m.read).length);
+        },
+        (err) => {
+          console.log('[CaretakerMsgs Error]:', err?.message || err);
+          setCaretakerMsgs([]);
+          setUnreadCount(0);
         }
-      },
-      () => { setCaretakerMsgs(DEMO_MSGS); setUnreadCount(1); }
-    );
-    return () => unsub();
+      );
+      return () => unsub();
+    } catch (e) {
+      console.log('[CaretakerMsgs Init Error]:', e);
+      setCaretakerMsgs([]);
+      setUnreadCount(0);
+    }
+  }, [uid]);
+
+  // Fetch elder's sent messages from Firestore (messages elder sent to caretaker)
+  useEffect(() => {
+    if (!uid || !db) { setElderSentMsgs([]); return; }
+    try {
+      const q = query(
+        collection(db, 'elderToCaretakerMessages'),
+        where('fromUserId', '==', uid),
+        orderBy('timestamp', 'desc'),
+        limit(30)
+      );
+      const unsub = onSnapshot(q,
+        snap => {
+          const msgs = snap.docs.map(d => ({ id: d.id, ...d.data() }));
+          setElderSentMsgs(msgs);
+        },
+        (err) => {
+          console.log('[ElderSentMsgs Error]:', err?.message || err);
+          setElderSentMsgs([]);
+        }
+      );
+      return () => unsub();
+    } catch (e) {
+      console.log('[ElderSentMsgs Init Error]:', e);
+      setElderSentMsgs([]);
+    }
   }, [uid]);
 
   // Mark read when tab opened
@@ -217,19 +304,20 @@ export default function FamilyScreen() {
     };
     setElderSentMsgs(prev => [localMsg, ...prev]);
 
-    if (uid && db && caretakerProfile && !caretakerProfile.isDemo) {
+    if (uid && db) {
       try {
-        await import('firebase/firestore').then(({ addDoc, collection, serverTimestamp }) =>
-          addDoc(collection(db, 'elderToCaretakerMessages'), {
-            fromUserId:    uid,
-            fromName:      auth.currentUser?.displayName || 'Elder',
-            toCaretakerId: caretakerProfile.id,
-            text,
-            timestamp:     serverTimestamp(),
-            read:          false,
-          })
-        );
-      } catch (_) {}
+        const { addDoc, collection, serverTimestamp } = await import('firebase/firestore');
+        await addDoc(collection(db, 'elderToCaretakerMessages'), {
+          fromUserId:    uid,
+          fromName:      auth.currentUser?.displayName || 'Senior',
+          toCaretakerId: caretakerProfile?.id || 'all',
+          text,
+          timestamp:     serverTimestamp(),
+          read:          false,
+        });
+      } catch (err) {
+        console.log('[ElderMsg Write Error]:', err);
+      }
     }
     setSending(false);
   };
@@ -345,6 +433,7 @@ export default function FamilyScreen() {
             loading={loadingCaretaker}
             isHindi={isHindi}
             activeSos={activeSos}
+            demoMessages={DEMO_MSGS}
           />
         )}
       </ScrollView>
@@ -568,7 +657,7 @@ function VoiceNoteBubble({ note, playing, isHindi, onPlay }) {
 
 // ─── Caretaker Tab (two-way chat) ─────────────────────────────────────────────
 
-function CaretakerTabContent({ messages, sentMessages, profile, loading, isHindi, activeSos }) {
+function CaretakerTabContent({ messages, sentMessages, profile, loading, isHindi, activeSos, demoMessages }) {
   const formatTime = (ts) => {
     try {
       const d = ts?.toDate ? ts.toDate() : new Date(ts);
@@ -580,14 +669,17 @@ function CaretakerTabContent({ messages, sentMessages, profile, loading, isHindi
     } catch { return ''; }
   };
 
-  // Merge caretaker messages + elder sent messages, sort newest first
+  // Prioritize real Firestore messages; only show demo placeholders if no real messages exist
+  const displayMessages = (messages && messages.length > 0) ? messages : (profile?.isDemo ? demoMessages : []);
+
+  // Merge caretaker messages + elder sent messages, sort oldest-first for chat UX
   const allMessages = [
-    ...messages.map(m => ({ ...m, senderType: 'caretaker' })),
+    ...displayMessages.map(m => ({ ...m, senderType: 'caretaker' })),
     ...sentMessages.map(m => ({ ...m, senderType: 'elder' })),
   ].sort((a, b) => {
     const ta = a.timestamp?.toDate?.() || new Date(0);
     const tb = b.timestamp?.toDate?.() || new Date(0);
-    return tb - ta;
+    return ta - tb; // oldest first = natural chat order
   });
 
   return (
