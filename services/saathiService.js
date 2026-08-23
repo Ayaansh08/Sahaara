@@ -5,7 +5,7 @@ import { transliterateToHindi } from './transliterate';
 
 const API_URL = 'http://192.168.1.105:3000';
 // Configurable API URL (Supports EXPO_PUBLIC_SAATHI_API_URL or default local dev)
-const getApiBaseUrl = () => {
+export const getApiBaseUrl = () => {
   if (process.env.EXPO_PUBLIC_SAATHI_API_URL) {
     return process.env.EXPO_PUBLIC_SAATHI_API_URL;
   }
@@ -50,7 +50,7 @@ export const sendSaathiMessage = async (message, conversationHistory = []) => {
     }
 
     const data = await response.json();
-    return data.reply || 'Main aapki baat samajh gaya. Kya aur bataenge?';
+    return data.reply || "मैं आपकी बात सुन रही हूँ, थोड़ा और बताइए।";
   } catch (error) {
     console.log('[saathiService] Network / Service Error:', error?.message || error);
     return 'Mujhe thodi dikkat ho rahi hai, thodi der baad phir koshish karte hain.';
