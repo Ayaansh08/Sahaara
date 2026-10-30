@@ -10,11 +10,16 @@
     "ios": {
       "supportsTablet": true,
       "infoPlist": {
-        "NSMicrophoneUsageDescription": "Sahaara needs microphone access so you can speak to Saathi."
+        "NSMicrophoneUsageDescription": "Sahaara needs microphone access so you can speak to Saathi. / साथी से बात करने के लिए माइक्रोफ़ोन की अनुमति चाहिए।",
+        "NSLocationWhenInUseUsageDescription": "Sahaara needs your location to send emergency assistance to your family. / आपातकालीन स्थिति में आपके परिवार को आपका स्थान भेजने के लिए स्थान की अनुमति आवश्यक है।"
       }
     },
     "android": {
-      "permissions": ["RECORD_AUDIO"],
+      "permissions": [
+        "RECORD_AUDIO",
+        "ACCESS_FINE_LOCATION",
+        "ACCESS_COARSE_LOCATION"
+      ],
       "adaptiveIcon": {
         "backgroundColor": "#F8F0E5",
         "foregroundImage": "./assets/images/sahaara-logo.png"

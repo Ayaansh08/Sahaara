@@ -160,3 +160,51 @@ assets/              App icons and other static assets
 - Audio narration for memories is currently represented by a coming-soon action.
 - The Saathi backend is intended for local development and should be deployed behind suitable authentication, rate limiting, and secret management before production use.
 - Firestore and Storage rules should be reviewed before deploying to a shared or production Firebase project.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Summary of Completed Work (Parts A – D)
+
+Part A — Backend (POST /api/sos):
+
+Implemented in server/index.js with coordinate validation (-90 to 90, -180 to 180), IST timestamps, single location block with Google Maps link, 10s fetch timeout with 1.5s delay between multiple contacts, env fallback (CALLMEBOT_PHONE, CALLMEBOT_KEY), phone normalization (91 prefix for 10-digit numbers), and rate limiting.
+Updated server/.env.example.
+
+Part B — Emergency Contacts (Firestore + UI):
+
+Created app/emergency-contacts.js storing contacts under users/{uid}/emergencyContacts/{id} (max 3, masked numbers •••• 1234, edit/delete modal, plain 18px CallMeBot instructions, and "Send test message" button calling /api/sos with reason "test").
+Added demo security notice comment: // NOTE: Storing the CallMeBot API key in Firestore is for the hackathon demo only.
+Linked as a prominent list row in app/(tabs)/more.js.
+Updated firestore.rules to allow authenticated users to manage their emergency contacts.
+
+Part C — Client SOS Service & Location Capture:
+
+Implemented services/sos.js:
+getCurrentLocation(): checks foreground permissions, tries High accuracy (6s timeout) 
+→
+→ Balanced (4s timeout) 
+→
+→ getLastKnownPositionAsync() with age in seconds, followed by reverse geocoding (3s timeout).
+sendSOS({ reason }): reads contacts, captures GPS, calls POST /api/sos, and generates a fallback wa.me URL with pre-filled text.
+
+Part D — Manual SOS Confirm & Result Screens:
+
+Updated components/SosModal.js and components/ScreenHeader.js:
+Displays friendly prompt to add contacts if 0 contacts are configured.
+Two-step confirm screen showing recipients and direct link to emergency contacts.
+Success screen with green check, contacts reached, address/coordinates, and "Map par dekhein" button.
+Failure screen with clear message and "WhatsApp se khud bhejein" button opening the pre-filled wa.me fallback link.
+All bilingual copy added to i18n/translations.js and location descriptions updated in app.json.

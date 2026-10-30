@@ -1,99 +1,79 @@
+/**
+ * components/LanguageToggle.js
+ * Large two-option language switcher — Hindi / English.
+ * Senior-friendly: each option at least 44px tall, clear active state.
+ */
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useTranslation } from '../context/LanguageContext';
-import { COLORS, SIZES } from '../constants/theme';
+import { colors, spacing, radius, border, sizes, fonts } from '../constants/theme';
 
-export default function LanguageToggle() {
+export default function LanguageToggle({ compact = false }) {
   const { language, setLanguage } = useTranslation();
 
-  const toggleLanguage = () => {
-    setLanguage(language === 'hi' ? 'en' : 'hi');
-  };
-
   return (
-    <TouchableOpacity
-      style={styles.toggleContainer}
-      onPress={toggleLanguage}
-      activeOpacity={0.8}
-      accessibilityRole="button"
-      accessibilityLabel={`Switch language. Current language is ${
-        language === 'hi' ? 'Hindi' : 'English'
-      }`}
-    >
-      <View
-        style={[
-          styles.segment,
-          language === 'hi' ? styles.segmentActive : styles.segmentInactive,
-        ]}
+    <View style={[styles.container, compact && styles.containerCompact]}>
+      <TouchableOpacity
+        style={[styles.option, language === 'hi' && styles.optionActive]}
+        onPress={() => setLanguage('hi')}
+        activeOpacity={0.8}
+        accessibilityRole="button"
+        accessibilityLabel="हिन्दी"
+        accessibilityState={{ selected: language === 'hi' }}
       >
-        <Text
-          style={[
-            styles.label,
-            language === 'hi' ? styles.labelActive : styles.labelInactive,
-          ]}
-        >
-          हिं
-        </Text>
-      </View>
+        <Text style={[styles.label, language === 'hi' && styles.labelActive]}>हिं</Text>
+      </TouchableOpacity>
 
-      <View
-        style={[
-          styles.segment,
-          language === 'en' ? styles.segmentActive : styles.segmentInactive,
-        ]}
+      <View style={styles.divider} />
+
+      <TouchableOpacity
+        style={[styles.option, language === 'en' && styles.optionActive]}
+        onPress={() => setLanguage('en')}
+        activeOpacity={0.8}
+        accessibilityRole="button"
+        accessibilityLabel="English"
+        accessibilityState={{ selected: language === 'en' }}
       >
-        <Text
-          style={[
-            styles.label,
-            language === 'en' ? styles.labelActive : styles.labelInactive,
-          ]}
-        >
-          EN
-        </Text>
-      </View>
-    </TouchableOpacity>
+        <Text style={[styles.label, language === 'en' && styles.labelActive]}>EN</Text>
+      </TouchableOpacity>
+    </View>
   );
 }
 
 const styles = StyleSheet.create({
-  toggleContainer: {
+  container: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#EFE5D8',
-    borderRadius: 24,
-    padding: 3,
-    minHeight: 52,
-    minWidth: 104,
-    borderWidth: 1.5,
-    borderColor: COLORS.border,
+    backgroundColor: colors.paperDeep,
+    borderRadius: radius.pill,
+    borderWidth: border.width,
+    borderColor: colors.line,
+    overflow: 'hidden',
   },
-  segment: {
-    flex: 1,
-    minHeight: 44,
+  containerCompact: {},
+  option: {
+    minHeight: sizes.touchMin,
+    minWidth: 56,
+    paddingHorizontal: spacing.md,
     justifyContent: 'center',
     alignItems: 'center',
-    borderRadius: 20,
-    paddingHorizontal: 8,
-  },
-  segmentActive: {
-    backgroundColor: COLORS.primary,
-    shadowColor: COLORS.primary,
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
-    shadowRadius: 3,
-    elevation: 2,
-  },
-  segmentInactive: {
     backgroundColor: 'transparent',
   },
+  optionActive: {
+    backgroundColor: colors.primary,
+  },
+  divider: {
+    width: border.width,
+    height: 32,
+    backgroundColor: colors.line,
+  },
   label: {
-    fontSize: 16,
-    fontWeight: '800',
+    fontFamily: fonts.button,
+    fontSize: 18,
+    color: colors.inkSoft,
+    lineHeight: 22,
   },
   labelActive: {
-    color: COLORS.textOnPrimary,
-  },
-  labelInactive: {
-    color: COLORS.textSecondary,
+    color: colors.onPrimary,
   },
 });

@@ -386,6 +386,211 @@ app.post('/api/transliterate', async (req, res) => {
   }
 });
 
+// ─── Emergency WhatsApp SOS Endpoint (CallMeBot) ──────────────────────────
+const sosRateLimits = new Map();
+
+function normalizePhoneNumber(raw) {
+  if (!raw) return '';
+  let cleaned = String(raw).replace(/[\s+\-()]/g, '');
+  if (cleaned.startsWith('0')) {
+    cleaned = cleaned.replace(/^0+/, '');
+  }
+  if (/^\d{10}$/.test(cleaned)) {
+    cleaned = '91' + cleaned;
+  }
+  return cleaned;
+}
+
+app.post('/api/sos', async (req, res) => {
+  try {
+    const { name = 'Sahaara Member', reason, location, contacts } = req.body;
+
+    const allowedReasons = ['manual', 'test', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse'];
+    if (!reason || !allowedReasons.includes(reason)) {
+      return res.status(400).json({ ok: false, error: 'Invalid or missing reason' });
+    }
+
+    // IP Rate Limiting
+    const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
+    const now = Date.now();
+    const isUrgent = (reason === 'manual' || reason === 'fall');
+    const cooldownMs = isUrgent ? 30000 : 3000;
+
+    const limitRecord = sosRateLimits.get(clientIp) || { lastUrgent: 0, lastQuick: 0 };
+    const lastTimestamp = isUrgent ? limitRecord.lastUrgent : limitRecord.lastQuick;
+
+    if (now - lastTimestamp < cooldownMs) {
+      const waitSec = Math.ceil((cooldownMs - (now - lastTimestamp)) / 1000);
+      return res.status(429).json({
+        ok: false,
+        error: `Rate limit exceeded. Please wait ${waitSec} seconds before sending another alert.`,
+      });
+    }
+
+    if (isUrgent) {
+      limitRecord.lastUrgent = now;
+    } else {
+      limitRecord.lastQuick = now;
+    }
+    sosRateLimits.set(clientIp, limitRecord);
+
+    // Validate location: lat between -90 and 90, lng between -180 and 180
+    let validLocation = null;
+    if (
+      location &&
+      typeof location.lat === 'number' &&
+      !isNaN(location.lat) &&
+      location.lat >= -90 &&
+      location.lat <= 90 &&
+      typeof location.lng === 'number' &&
+      !isNaN(location.lng) &&
+      location.lng >= -180 &&
+      location.lng <= 180
+    ) {
+      validLocation = {
+        lat: location.lat,
+        lng: location.lng,
+        accuracy: typeof location.accuracy === 'number' ? location.accuracy : null,
+        address: location.address ? String(location.address).trim() : null,
+        ageSec: typeof location.ageSec === 'number' ? location.ageSec : null,
+      };
+    }
+
+    // Build location block
+    let locationBlock = '';
+    if (validLocation) {
+      const latStr = validLocation.lat.toFixed(6);
+      const lngStr = validLocation.lng.toFixed(6);
+      const addressLine = validLocation.address
+        ? `📍 Location: ${validLocation.address}`
+        : '📍 Location: Known coordinates';
+      const coordsLine = `Coordinates: ${latStr}, ${lngStr}`;
+      const accuracyLine = validLocation.accuracy
+        ? `Accuracy: about ${Math.round(validLocation.accuracy)} m`
+        : null;
+      const mapsLine = `Open in Google Maps: https://www.google.com/maps/search/?api=1&query=${latStr},${lngStr}`;
+      const ageLine =
+        validLocation.ageSec && validLocation.ageSec > 120
+          ? `(last known location, ${Math.round(validLocation.ageSec / 60)} min old)`
+          : null;
+
+      locationBlock = [addressLine, coordsLine, accuracyLine, mapsLine, ageLine]
+        .filter(Boolean)
+        .join('\n');
+    } else {
+      locationBlock = '📍 Location not available. Please call them.';
+    }
+
+    // Current time in IST
+    const istTime = new Date().toLocaleString('en-IN', {
+      timeZone: 'Asia/Kolkata',
+      hour: 'numeric',
+      minute: '2-digit',
+      hour12: true,
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+    });
+
+    // Message reason template
+    let reasonText = '';
+    switch (reason) {
+      case 'manual':
+        reasonText = `🚨 SOS from ${name}. They pressed the SOS button and need help.`;
+        break;
+      case 'test':
+        reasonText = `✅ Test message from Sahaara for ${name}. Your alerts are set up correctly.`;
+        break;
+      case 'fall':
+        reasonText = `🚨 SOS: A possible fall was detected for ${name}.`;
+        break;
+      case 'fall_ok':
+        reasonText = `✅ Update: ${name} says they are okay.`;
+        break;
+      case 'fall_help':
+        reasonText = `🚨 ${name} says they need help after a fall. Please call them now.`;
+        break;
+      case 'fall_noresponse':
+        reasonText = `🚨 No response from ${name} after a fall alert. Please call them or check on them now.`;
+        break;
+    }
+
+    const fullMessage = `${reasonText}\nTime: ${istTime} IST\n\n${locationBlock}`;
+
+    // Target contacts
+    let targetContacts = [];
+    if (Array.isArray(contacts) && contacts.length > 0) {
+      targetContacts = contacts
+        .map(c => ({
+          phone: normalizePhoneNumber(c.phone),
+          key: c.key || c.callmebotKey || '',
+        }))
+        .filter(c => c.phone && c.key);
+    }
+
+    if (targetContacts.length === 0 && process.env.CALLMEBOT_PHONE && process.env.CALLMEBOT_KEY) {
+      targetContacts.push({
+        phone: normalizePhoneNumber(process.env.CALLMEBOT_PHONE),
+        key: process.env.CALLMEBOT_KEY,
+      });
+    }
+
+    if (targetContacts.length === 0) {
+      console.log(`[SOS] Alert (${reason}) for ${name}: No contacts or CallMeBot keys provided.`);
+      return res.json({
+        ok: false,
+        error: 'No valid emergency contacts configured',
+        results: [],
+      });
+    }
+
+    console.log(`[SOS] Alert (${reason}) sending to ${targetContacts.length} contact(s) for member "${name}".`);
+
+    const results = [];
+    for (let i = 0; i < targetContacts.length; i++) {
+      const contact = targetContacts[i];
+      const maskedPhone = contact.phone.length >= 4 ? `...${contact.phone.slice(-4)}` : '****';
+      let sent = false;
+
+      try {
+        const url = `https://api.callmebot.com/whatsapp.php?phone=${contact.phone}&text=${encodeURIComponent(fullMessage)}&apikey=${encodeURIComponent(contact.key)}`;
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
+
+        const callmeRes = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        const resText = await callmeRes.text();
+        if (callmeRes.ok && !resText.toLowerCase().includes('error')) {
+          sent = true;
+        } else {
+          console.log(`[SOS] CallMeBot response for ${maskedPhone}: status=${callmeRes.status}`);
+        }
+      } catch (err) {
+        console.log(`[SOS] Error reaching CallMeBot for ${maskedPhone}:`, err.name === 'AbortError' ? 'Timeout' : err.message);
+      }
+
+      results.push({
+        phone: contact.phone.slice(-4),
+        sent,
+      });
+
+      if (i < targetContacts.length - 1) {
+        await new Promise(r => setTimeout(r, 1500));
+      }
+    }
+
+    return res.json({
+      ok: results.some(r => r.sent),
+      results,
+    });
+  } catch (error) {
+    console.error('[SOS] Error processing /api/sos:', error);
+    return res.status(500).json({ ok: false, error: 'Internal server error' });
+  }
+});
+
 // Healthcheck
 app.get('/health', (req, res) => res.json({ status: 'ok', service: 'Sahaara SAATHI Backend', model: GROQ_MODEL }));
 
