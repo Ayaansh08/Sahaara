@@ -4,7 +4,7 @@
  * Connects with Meta WhatsApp Business Cloud API backend for instant alerts.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -29,6 +29,7 @@ import {
   serverTimestamp,
 } from 'firebase/firestore';
 import { auth, db } from '../firebase/config';
+import { onAuthStateChanged } from 'firebase/auth';
 import { useTranslation } from '../context/LanguageContext';
 import { colors, spacing, radius, sizes, border, fonts, textStyle } from '../constants/theme';
 import ScreenHeader from '../components/ScreenHeader';
@@ -64,32 +65,48 @@ export default function EmergencyContactsScreen() {
   const [deleting, setDeleting] = useState(false);
 
   useEffect(() => {
-    const user = auth.currentUser;
-    if (!user || !db) {
-      setLoading(false);
-      return;
-    }
+    // Wait for Firebase Auth to restore its session from AsyncStorage before
+    // attaching the Firestore listener. Using auth.currentUser synchronously
+    // here would race against the async session restore and yield null on
+    // first mount, causing a spurious "Missing or insufficient permissions" error.
+    let firestoreUnsubscribe = null;
 
-    const contactsRef = collection(db, 'users', user.uid, 'emergencyContacts');
-    const q = query(contactsRef, orderBy('createdAt', 'desc'));
-
-    const unsubscribe = onSnapshot(
-      q,
-      (snapshot) => {
-        const list = snapshot.docs.map((docSnap) => ({
-          id: docSnap.id,
-          ...docSnap.data(),
-        }));
-        setContacts(list);
-        setLoading(false);
-      },
-      (err) => {
-        console.log('[EmergencyContacts] Firestore error:', err.message);
-        setLoading(false);
+    const authUnsubscribe = onAuthStateChanged(auth, (user) => {
+      // Tear down any previous Firestore listener (e.g. user signed out)
+      if (firestoreUnsubscribe) {
+        firestoreUnsubscribe();
+        firestoreUnsubscribe = null;
       }
-    );
 
-    return () => unsubscribe();
+      if (!user || !db) {
+        setLoading(false);
+        return;
+      }
+
+      const contactsRef = collection(db, 'users', user.uid, 'emergencyContacts');
+      const q = query(contactsRef, orderBy('createdAt', 'desc'));
+
+      firestoreUnsubscribe = onSnapshot(
+        q,
+        (snapshot) => {
+          const list = snapshot.docs.map((docSnap) => ({
+            id: docSnap.id,
+            ...docSnap.data(),
+          }));
+          setContacts(list);
+          setLoading(false);
+        },
+        (err) => {
+          console.log('[EmergencyContacts] Firestore error:', err.message);
+          setLoading(false);
+        }
+      );
+    });
+
+    return () => {
+      authUnsubscribe();
+      if (firestoreUnsubscribe) firestoreUnsubscribe();
+    };
   }, []);
 
   const openAddModal = () => {

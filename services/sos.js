@@ -7,6 +7,7 @@
 
 import * as Location from 'expo-location';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../firebase/config';
 import { getApiBaseUrl } from './saathiService';
 
@@ -17,6 +18,33 @@ const withTimeout = (promise, ms) => {
     new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), ms)),
   ]);
 };
+
+/**
+ * Resolves the currently authenticated Firebase user, waiting up to `timeoutMs`
+ * for the async session restore from AsyncStorage to complete.
+ * Using auth.currentUser synchronously at component mount time races against
+ * the restore and can return null even when the user is logged in.
+ */
+function waitForAuthUser(timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    // If auth has already resolved its state, currentUser is immediately available.
+    if (auth.currentUser !== undefined) {
+      // currentUser is null (signed out) or a User object — either way, resolved.
+      // Note: Firebase sets currentUser to null (not undefined) once resolved.
+      resolve(auth.currentUser);
+      return;
+    }
+    const timer = setTimeout(() => {
+      unsubscribe();
+      resolve(null);
+    }, timeoutMs);
+    const unsubscribe = onAuthStateChanged(auth, (user) => {
+      clearTimeout(timer);
+      unsubscribe();
+      resolve(user);
+    });
+  });
+}
 
 /**
  * 1. Asks for foreground permission once
@@ -119,10 +147,12 @@ export function normalizePhone(raw) {
 }
 
 /**
- * Reads user emergency contacts from Firestore users/{uid}/emergencyContacts
+ * Reads user emergency contacts from Firestore users/{uid}/emergencyContacts.
+ * Waits for Firebase Auth to restore its session before querying, to avoid
+ * spurious "Missing or insufficient permissions" errors at app start.
  */
 export async function getEmergencyContacts() {
-  const user = auth.currentUser;
+  const user = await waitForAuthUser();
   if (!user || !db) return [];
 
   try {
