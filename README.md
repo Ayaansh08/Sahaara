@@ -162,49 +162,147 @@ assets/              App icons and other static assets
 - Firestore and Storage rules should be reviewed before deploying to a shared or production Firebase project.
 
 
+## Emergency SOS & Twilio WhatsApp Integration
 
+SAHAARA includes an emergency SOS alerting system that dispatches individual WhatsApp notifications to registered family guardians when an elder triggers an alert or when fall detection occurs.
 
+The backend uses the official **Twilio Node.js SDK** with Content API templates to dispatch alerts and tracks real-time message delivery through Twilio status callbacks.
 
+### 1. Twilio Environment Variables
 
+Configure these variables in `server/.env` (see `server/.env.example`):
 
+``env
+# Twilio Account & API Key Credentials (used for outbound API calls)
+TWILIO_ACCOUNT_SID=your_twilio_account_sid
+TWILIO_API_KEY=your_twilio_api_key_sid
+TWILIO_API_SECRET=your_twilio_api_key_secret
 
+# Twilio Auth Token (used to validate inbound X-Twilio-Signature webhooks)
+TWILIO_AUTH_TOKEN=your_twilio_auth_token
 
+# WhatsApp Sender
+# For Sandbox: whatsapp:+17372508034 (or your assigned Twilio Sandbox number)
+# For Production: whatsapp:+<your_approved_twilio_business_number>
+TWILIO_WHATSAPP_FROM=whatsapp:+17372508034
 
+# Operating Mode: 'sandbox' or 'production'
+TWILIO_WHATSAPP_MODE=sandbox
 
+# Approved WhatsApp Content Template SID
+# NOTE: In Sandbox, the pre-approved Appointment Reminder template
+# (HXfe5ab5f00277942d4d4200328b4d403c) is blocked from SOS alerts.
+# An approved production emergency SOS template Content SID is required.
+TWILIO_WHATSAPP_CONTENT_SID=your_approved_content_sid
 
+# Public HTTPS Status Callback Webhook URL (optional for delivery callbacks)
+TWILIO_STATUS_CALLBACK_URL=https://your-domain.com/api/twilio/status-callback
+``
 
+> **Security Note:** Never commit `server/.env` or expose Twilio API credentials to Git, client mobile code, or client API responses.
 
+---
 
+### 2. Twilio WhatsApp Sandbox Setup
 
-Summary of Completed Work (Parts A – D)
+Twilio provides a free WhatsApp Sandbox for development and testing.
 
-Part A — Backend (POST /api/sos):
+#### Activating the Sandbox
+1. Log in to the [Twilio Console](https://console.twilio.com/).
+2. Navigate to **Messaging > Try it out > Send a WhatsApp message**.
+3. Locate your Sandbox phone number (e.g., `+1 737 250 8034`) and your unique Sandbox Join Code (e.g., `join <word>-<word>`).
 
-Implemented in server/index.js with coordinate validation (-90 to 90, -180 to 180), IST timestamps, single location block with Google Maps link, 10s fetch timeout with 1.5s delay between multiple contacts, env fallback (CALLMEBOT_PHONE, CALLMEBOT_KEY), phone normalization (91 prefix for 10-digit numbers), and rate limiting.
-Updated server/.env.example.
+#### Joining the Sandbox as a Guardian
+Because Twilio Sandbox is a restricted trial environment, recipients cannot receive business-initiated notifications until they opt in:
+1. Open WhatsApp on the guardian's phone.
+2. Send the exact message `join <your-sandbox-code>` to the Twilio Sandbox number (e.g., `+1 737 250 8034`).
+3. Twilio will reply with a confirmation message: *"You are all set! The sandbox session is now active."*
+4. **Expiry:** Sandbox sessions automatically expire after **72 hours (3 days)**. If expired, the guardian must re-send the join code.
 
-Part B — Emergency Contacts (Firestore + UI):
+#### Sandbox Restrictions & Limitations
+- **Recipient Opt-in Required:** Only phone numbers that have actively joined the Sandbox within the last 72 hours can receive messages. Unjoined numbers fail immediately with Twilio Error `63015`.
+- **Pre-Approved Templates Only:** The Sandbox only permits business-initiated messages using Twilio's default pre-approved templates (such as appointment reminders, verification codes, or order notifications). Custom templates cannot be registered in the Sandbox.
+- **Appointment Reminder Restriction:** The default Sandbox template (`HXfe5ab5f00277942d4d4200328b4d403c`) is an appointment reminder (*"Reminder: Appt Tue Oct 29..."*). SAHAARA strictly blocks sending this template for emergency SOS alerts to avoid misleading family members.
+- **Rate Limit:** Twilio enforces a strict rate limit of **1 message per 3 seconds** on the Sandbox sender. The backend automatically enforces sequential sending with a 3-second delay between guardian alerts.
 
-Created app/emergency-contacts.js storing contacts under users/{uid}/emergencyContacts/{id} (max 3, masked numbers •••• 1234, edit/delete modal, plain 18px CallMeBot instructions, and "Send test message" button calling /api/sos with reason "test").
-Added demo security notice comment: // NOTE: Storing the CallMeBot API key in Firestore is for the hackathon demo only.
-Linked as a prominent list row in app/(tabs)/more.js.
-Updated firestore.rules to allow authenticated users to manage their emergency contacts.
+---
 
-Part C — Client SOS Service & Location Capture:
+### 3. Testing WhatsApp SOS
 
-Implemented services/sos.js:
-getCurrentLocation(): checks foreground permissions, tries High accuracy (6s timeout) 
-→
-→ Balanced (4s timeout) 
-→
-→ getLastKnownPositionAsync() with age in seconds, followed by reverse geocoding (3s timeout).
-sendSOS({ reason }): reads contacts, captures GPS, calls POST /api/sos, and generates a fallback wa.me URL with pre-filled text.
+#### Automated Test Suite (Mocked)
+The backend includes a comprehensive automated test suite testing all 18 failure and success scenarios without sending real messages or incurring Twilio costs:
 
-Part D — Manual SOS Confirm & Result Screens:
+``bash
+cd server
+npm test
+``
 
-Updated components/SosModal.js and components/ScreenHeader.js:
-Displays friendly prompt to add contacts if 0 contacts are configured.
-Two-step confirm screen showing recipients and direct link to emergency contacts.
-Success screen with green check, contacts reached, address/coordinates, and "Map par dekhein" button.
-Failure screen with clear message and "WhatsApp se khud bhejein" button opening the pre-filled wa.me fallback link.
-All bilingual copy added to i18n/translations.js and location descriptions updated in app.json.
+This verifies:
+1. Single guardian API submission.
+2. Sequential multi-guardian dispatch.
+3. 3-second interval enforcement in Sandbox mode.
+4. Error `63015` handling for unjoined recipients.
+5. Independent guardian failure isolation.
+6. Invalid phone number rejection.
+7. Missing configuration handling.
+8. Content SID resolution.
+9. ContentVariables serialization.
+10. Twilio API error recording.
+11. Accurate status mapping (`QUEUED`/`SENT`, never falsely marked as `DELIVERED`).
+12. Status callback updates (`DELIVERED`, `READ`).
+13. `X-Twilio-Signature` webhook validation.
+14. Idempotency and out-of-order callback protection.
+15. Unauthenticated SOS request rejection (Firebase ID token required).
+16. Location retrieval failure resilience (alert proceeds even without GPS).
+17. Duplicate SOS rate limiting and debounce protection.
+18. Blocking of the default Appointment Reminder Content SID.
+
+#### Manual Sandbox Testing
+1. Ensure the recipient's phone number has joined your Sandbox via WhatsApp (`join <code>`).
+2. Add the guardian's phone number in the SAHAARA app under **More > Emergency Contacts**.
+3. Trigger a test SOS alert by tapping **Send test message** on the contact, or press the main **SOS button** on the home screen.
+4. Verify the recipient receives the alert and that the mobile screen displays **Accepted** status.
+
+---
+
+### 4. Configuring Status Callbacks (Real-time Delivery Tracking)
+
+Twilio can report delivery receipts (`delivered`) and read receipts (`read`) back to the SAHAARA backend:
+
+1. Deploy the backend to a publicly accessible HTTPS domain (or use a secure tunnel like `ngrok` for local development):
+   ``bash
+   ngrok http 3000
+   ``
+2. Set `TWILIO_STATUS_CALLBACK_URL` in `server/.env`:
+   ``env
+   TWILIO_STATUS_CALLBACK_URL=https://your-tunnel.ngrok-free.app/api/twilio/status-callback
+   ``
+3. The backend validates `X-Twilio-Signature` using your `TWILIO_AUTH_TOKEN`.
+4. Delivery events (`delivered`, `read`, `failed`, `undelivered`) automatically update the Firestore `sos_alerts` record.
+
+If `TWILIO_STATUS_CALLBACK_URL` is not set, outbound alerts will still be sent, but delivery updates will not be received.
+
+---
+
+### 5. Moving to Production
+
+To send free-form emergency alerts or custom branded SOS templates without Sandbox restrictions:
+
+1. **Twilio Upgraded Account:** Upgrade your Twilio trial account to a full paid account.
+2. **WhatsApp Business Profile (WABA):** Register a dedicated Twilio WhatsApp sender under **Messaging > Senders > WhatsApp senders** and complete Meta Business Verification.
+3. **Approved Emergency Content Template:**
+   - Create a WhatsApp Utility template in the Twilio Content Editor (e.g., `sahaara_sos_emergency_alert`).
+   - Submit it to Meta for review and approval.
+   - Example template body:
+     ``text
+     ?? EMERGENCY SOS: {{1}} needs immediate assistance!
+     Message: {{2}}
+     Location: {{3}}
+     Maps: {{4}}
+     Time: {{5}}
+     ``
+   - Obtain the approved `Content SID` (starts with `HX...`).
+4. **Switch Configuration:**
+   - Set `TWILIO_WHATSAPP_MODE=production`.
+   - Set `TWILIO_WHATSAPP_FROM=whatsapp:+<your_approved_number>`.
+   - Set `TWILIO_WHATSAPP_CONTENT_SID=HX<your_approved_sos_template_sid>`.

@@ -134,7 +134,7 @@ export default function SosModal({ visible, onClose }) {
             message: 'Manual SOS alert triggered via Sahaara app',
             timestamp: serverTimestamp(),
             contacts: contacts.map((c) => c.name),
-            provider: result.provider || 'meta_cloud_api',
+            provider: result.provider || 'twilio_whatsapp',
           });
         }
       } catch (fbErr) {
@@ -354,7 +354,7 @@ export default function SosModal({ visible, onClose }) {
               {/* Reached / Accepted contacts */}
               <View style={styles.reachedBox}>
                 <Text style={[textStyle('label', lang, colors.calm), { fontFamily: fonts.bodyStrong }]}>
-                  {isHindi ? 'संपर्क स्थिति (मेटा एपीआई):' : 'Contact Status (Meta API):'}
+                  {isHindi ? 'संपर्क स्थिति (मेटा एपीआई):' : 'Contact Status (WhatsApp):'}
                 </Text>
                 <Text style={[textStyle('body', lang, colors.ink), { marginTop: 4 }]}>
                   {contacts.map((c) => {

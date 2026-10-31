@@ -205,7 +205,7 @@ export function buildFallbackWaLink(firstContact, name, reason, location) {
  * Sends SOS alert to backend and returns response + fallback wa.me link
  */
 export async function sendSOS({ reason = 'manual' }) {
-  const user = auth.currentUser;
+  const user = await waitForAuthUser();
   const name = user?.displayName || user?.email?.split('@')[0] || 'Sahaara Member';
 
   // 1. Fetch contacts
@@ -236,11 +236,17 @@ export async function sendSOS({ reason = 'manual' }) {
 
     console.log(`[SOS Service] Sending SOS (${reason}) to ${endpoint}`);
 
+    const idToken = user ? await user.getIdToken().catch(() => null) : null;
+    const headers = {
+      'Content-Type': 'application/json',
+    };
+    if (idToken) {
+      headers['Authorization'] = `Bearer ${idToken}`;
+    }
+
     const res = await fetch(endpoint, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
+      headers,
       body: JSON.stringify(payload),
     });
 
@@ -256,7 +262,10 @@ export async function sendSOS({ reason = 'manual' }) {
       contacts,
       fallbackWaLink,
       error: data.error,
-      provider: data.provider || 'meta_cloud_api',
+      provider: data.provider || 'twilio_whatsapp',
+      mode: data.mode || 'sandbox',
+      deliveryCallbacksEnabled: data.deliveryCallbacksEnabled || false,
+      alertId: data.alertId || null,
     };
   } catch (err) {
     console.log('[SOS Service] Backend call failed:', err.message);
@@ -271,7 +280,10 @@ export async function sendSOS({ reason = 'manual' }) {
       contacts,
       fallbackWaLink,
       error: err.message,
-      provider: 'meta_cloud_api',
+      provider: 'twilio_whatsapp',
+      mode: 'sandbox',
+      deliveryCallbacksEnabled: false,
+      alertId: null,
     };
   }
 }

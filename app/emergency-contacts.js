@@ -239,13 +239,16 @@ export default function EmergencyContactsScreen() {
       const user = auth.currentUser;
       const elderName = user?.displayName || user?.email?.split('@')[0] || 'Sahaara Member';
 
+      const idToken = user ? await user.getIdToken().catch(() => null) : null;
+      const headers = { 'Content-Type': 'application/json' };
+      if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+
       const res = await fetch(`${baseUrl}/api/sos`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers,
         body: JSON.stringify({
           name: elderName,
           reason: 'test',
-          contacts: [{ phone: trimmedPhone, name: name.trim() || 'Guardian' }],
         }),
       });
 
