@@ -13,6 +13,8 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Linking,
+  AppState,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter } from 'expo-router';
@@ -64,9 +66,31 @@ export default function SosModal({ visible, onClose }) {
     (sosResult?.error && String(sosResult.error).toLowerCase().includes('unauthorized'))
   );
 
+  // Manual WhatsApp sending state per guardian: { [contactKey]: 'ready' | 'opened' | 'returned' }
+  const [manualStates, setManualStates] = useState({});
+  const activeOpenContactRef = useRef(null);
+
   // Debouncing & double-click protection ref
   const isTriggeringRef = useRef(false);
   const lastTriggerTimeRef = useRef(0);
+
+  // Track when user returns from opening WhatsApp to update status accurately
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active' && activeOpenContactRef.current) {
+        const targetKey = activeOpenContactRef.current;
+        setManualStates((prev) => ({
+          ...prev,
+          [targetKey]: 'returned',
+        }));
+        activeOpenContactRef.current = null;
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
 
   useEffect(() => {
     if (visible) {
@@ -74,6 +98,8 @@ export default function SosModal({ visible, onClose }) {
       setStep('idle');
       setResultState(null);
       setSosResult(null);
+      setManualStates({});
+      activeOpenContactRef.current = null;
 
       getEmergencyContacts()
         .then((list) => {
@@ -197,9 +223,23 @@ export default function SosModal({ visible, onClose }) {
     }
   };
 
+  const handleOpenGuardianWhatsApp = (guardian) => {
+    if (!guardian?.waLink) return;
+    const targetKey = guardian.id || guardian.phone || guardian.name;
+    activeOpenContactRef.current = targetKey;
+    setManualStates((prev) => ({
+      ...prev,
+      [targetKey]: 'opened',
+    }));
+    Linking.openURL(guardian.waLink);
+  };
+
   const openFallbackWhatsApp = () => {
-    if (sosResult?.fallbackWaLink) {
-      Linking.openURL(sosResult.fallbackWaLink);
+    const firstGuardian =
+      (sosResult?.fallbackGuardians && sosResult.fallbackGuardians[0]) ||
+      (sosResult?.fallbackWaLink ? { id: 'primary', waLink: sosResult.fallbackWaLink } : null);
+    if (firstGuardian) {
+      handleOpenGuardianWhatsApp(firstGuardian);
     }
   };
 
@@ -212,6 +252,11 @@ export default function SosModal({ visible, onClose }) {
     >
       <View style={styles.overlay}>
         <View style={styles.card}>
+          <ScrollView
+            style={styles.cardScroll}
+            contentContainerStyle={styles.cardScrollContent}
+            showsVerticalScrollIndicator={false}
+          >
           {checkingContacts ? (
             <View style={styles.loadingBox}>
               <ActivityIndicator color={colors.primary} size="large" />
@@ -469,19 +514,142 @@ export default function SosModal({ visible, onClose }) {
                 </View>
               ) : null}
 
-              {sosResult?.fallbackWaLink ? (
-                <TouchableOpacity
-                  style={[styles.confirmBtn, { backgroundColor: '#25D366', marginBottom: spacing.md }]}
-                  onPress={openFallbackWhatsApp}
-                  activeOpacity={0.82}
-                  accessibilityRole="button"
-                >
-                  <Ionicons name="logo-whatsapp" size={24} color="#FFFFFF" style={{ marginRight: spacing.sm }} />
-                  <Text style={[textStyle('button', lang, '#FFFFFF')]}>
-                    {isHindi ? 'व्हाट्सएप से खुद भेजें' : 'Send via WhatsApp yourself'}
-                  </Text>
-                </TouchableOpacity>
-              ) : null}
+              {/* Manual WhatsApp Fallback Section for registered guardians */}
+              {(() => {
+                const fallbackGuardians =
+                  sosResult?.fallbackGuardians && sosResult.fallbackGuardians.length > 0
+                    ? sosResult.fallbackGuardians
+                    : sosResult?.fallbackWaLink
+                    ? [
+                        {
+                          id: contacts[0]?.id || 'contact-0',
+                          name: contacts[0]?.name || 'Guardian',
+                          relation: contacts[0]?.relation || '',
+                          phone: contacts[0]?.phone || '',
+                          waLink: sosResult.fallbackWaLink,
+                        },
+                      ]
+                    : [];
+
+                if (fallbackGuardians.length === 0) return null;
+
+                return (
+                  <View style={{ width: '100%', marginBottom: spacing.md }}>
+                    {/* Clear Manual Step Notice */}
+                    <View style={styles.manualNoticeBox}>
+                      <Ionicons name="information-circle" size={22} color={colors.primary} />
+                      <View style={{ flex: 1, marginLeft: spacing.xs }}>
+                        <Text style={[textStyle('label', lang, colors.primary), { fontWeight: '700' }]}>
+                          {isHindi ? 'WhatsApp पर मैन्युअल रूप से भेजें' : 'Manual Send Required in WhatsApp'}
+                        </Text>
+                        <Text style={[textStyle('body', lang, colors.inkSoft), { fontSize: 13, lineHeight: 18, marginTop: 2 }]}>
+                          {isHindi
+                            ? 'WhatsApp आपका आपातकालीन संदेश पहले से भरकर खोलेगा। संदेश भेजने के लिए आपको WhatsApp में हरा "Send" (✈️) बटन दबाना होगा।'
+                            : 'WhatsApp will open with your emergency message prefilled. You must tap Send (✈️) in WhatsApp to deliver the message.'}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Individual Guardian Cards */}
+                    <View style={styles.guardiansListContainer}>
+                      {fallbackGuardians.map((g, idx) => {
+                        const contactKey = g.id || g.phone || g.name || String(idx);
+                        const currentState = manualStates[contactKey] || 'ready';
+
+                        return (
+                          <View key={contactKey} style={styles.guardianFallbackCard}>
+                            <View style={styles.guardianFallbackHeader}>
+                              <View style={{ flex: 1 }}>
+                                <Text style={[textStyle('heading', lang, colors.ink), { fontSize: 16, lineHeight: 22 }]}>
+                                  {g.name} {g.relation ? `(${g.relation})` : ''}
+                                </Text>
+                                {g.phone ? (
+                                  <Text style={[textStyle('label', lang, colors.inkSoft), { fontSize: 13 }]}>
+                                    {g.phone}
+                                  </Text>
+                                ) : null}
+                              </View>
+
+                              {/* State Badge */}
+                              <View
+                                style={[
+                                  styles.statePill,
+                                  currentState === 'returned'
+                                    ? styles.statePillReturned
+                                    : currentState === 'opened'
+                                    ? styles.statePillOpened
+                                    : styles.statePillReady,
+                                ]}
+                              >
+                                <Ionicons
+                                  name={
+                                    currentState === 'returned'
+                                      ? 'help-circle-outline'
+                                      : currentState === 'opened'
+                                      ? 'open-outline'
+                                      : 'time-outline'
+                                  }
+                                  size={13}
+                                  color={
+                                    currentState === 'returned'
+                                      ? '#B45309'
+                                      : currentState === 'opened'
+                                      ? '#D97706'
+                                      : colors.inkSoft
+                                  }
+                                />
+                                <Text
+                                  style={[
+                                    styles.statePillText,
+                                    {
+                                      color:
+                                        currentState === 'returned'
+                                          ? '#B45309'
+                                          : currentState === 'opened'
+                                          ? '#D97706'
+                                          : colors.inkSoft,
+                                    },
+                                  ]}
+                                >
+                                  {currentState === 'returned'
+                                    ? (isHindi ? 'वापस आए • पुष्टि नहीं' : 'Returned • Not confirmed')
+                                    : currentState === 'opened'
+                                    ? (isHindi ? 'WhatsApp खोला गया' : 'WhatsApp opened')
+                                    : (isHindi ? 'भेजने के लिए तैयार' : 'Ready to send')}
+                                </Text>
+                              </View>
+                            </View>
+
+                            {currentState === 'returned' && (
+                              <Text style={[textStyle('body', lang, colors.inkSoft), styles.returnedNote]}>
+                                {isHindi
+                                  ? 'WhatsApp संदेश भेजने की पुष्टि नहीं देता। कृपया सुनिश्चित करें कि आपने WhatsApp में Send दबाया था।'
+                                  : 'Delivery cannot be verified automatically. Ensure you tapped Send in WhatsApp.'}
+                              </Text>
+                            )}
+
+                            <TouchableOpacity
+                              style={[styles.confirmBtn, styles.waSendBtn]}
+                              onPress={() => handleOpenGuardianWhatsApp(g)}
+                              activeOpacity={0.82}
+                              accessibilityRole="button"
+                            >
+                              <Ionicons name="logo-whatsapp" size={22} color="#FFFFFF" style={{ marginRight: spacing.xs }} />
+                              <Text style={[textStyle('button', lang, '#FFFFFF'), { fontSize: 16 }]}>
+                                {currentState === 'returned'
+                                  ? (isHindi ? `${g.name} के लिए फिर से खोलें` : `Open WhatsApp again for ${g.name}`)
+                                  : currentState === 'opened'
+                                  ? (isHindi ? `${g.name} का WhatsApp खोल रहे हैं...` : `Opening WhatsApp for ${g.name}...`)
+                                  : (isHindi ? `${g.name} को WhatsApp से भेजें` : `Send to ${g.name} via WhatsApp`)}
+                              </Text>
+                            </TouchableOpacity>
+                          </View>
+                        );
+                      })}
+                    </View>
+                  </View>
+                );
+              })()}
 
               <TouchableOpacity
                 style={styles.cancelBtn}
@@ -495,6 +663,7 @@ export default function SosModal({ visible, onClose }) {
               </TouchableOpacity>
             </>
           )}
+          </ScrollView>
         </View>
       </View>
     </Modal>
@@ -516,7 +685,15 @@ const styles = StyleSheet.create({
     borderRadius: radius.card,
     padding: spacing.xl,
     width: '100%',
+    maxHeight: '90%',
     alignItems: 'center',
+  },
+  cardScroll: {
+    width: '100%',
+  },
+  cardScrollContent: {
+    alignItems: 'center',
+    width: '100%',
   },
   loadingBox: {
     paddingVertical: spacing.xl,
@@ -681,5 +858,75 @@ const styles = StyleSheet.create({
     backgroundColor: colors.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  manualNoticeBox: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    backgroundColor: colors.paperDeep,
+    borderRadius: radius.card,
+    borderWidth: border.width,
+    borderColor: colors.line,
+    padding: spacing.md,
+    marginBottom: spacing.md,
+    width: '100%',
+  },
+  guardiansListContainer: {
+    width: '100%',
+    gap: spacing.sm,
+    marginBottom: spacing.md,
+  },
+  guardianFallbackCard: {
+    width: '100%',
+    backgroundColor: colors.paperDeep,
+    borderRadius: radius.card,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: spacing.md,
+  },
+  guardianFallbackHeader: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    justifyContent: 'space-between',
+    marginBottom: spacing.xs,
+  },
+  statePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: spacing.sm,
+    paddingVertical: 3,
+    borderRadius: 12,
+    gap: 4,
+  },
+  statePillReady: {
+    backgroundColor: colors.paper,
+    borderWidth: 1,
+    borderColor: colors.line,
+  },
+  statePillOpened: {
+    backgroundColor: '#FEF3C7',
+    borderWidth: 1,
+    borderColor: '#FDE68A',
+  },
+  statePillReturned: {
+    backgroundColor: '#FDE68A',
+    borderWidth: 1,
+    borderColor: '#F59E0B',
+  },
+  statePillText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  returnedNote: {
+    fontSize: 12,
+    lineHeight: 16,
+    color: colors.inkSoft,
+    marginBottom: spacing.xs,
+    fontStyle: 'italic',
+  },
+  waSendBtn: {
+    backgroundColor: '#25D366',
+    marginTop: spacing.xs,
+    marginBottom: 0,
+    minHeight: 48,
   },
 });

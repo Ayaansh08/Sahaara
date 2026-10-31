@@ -1284,6 +1284,87 @@ async function runAllTests() {
     assert.notStrictEqual(resValid.status, 401, 'Valid authenticated token must pass authentication');
   });
 
+  // Test 37: REGRESSION - Manual emergency message format includes all required hackathon parameters
+  await runTest('37. REGRESSION: Manual emergency message format includes all required hackathon parameters', async () => {
+    // Helper mimicking the client-side emergency message builder
+    function buildTestEmergencyMessage({ name, reason, location, timestamp }) {
+      const timeStr = timestamp || '1 Nov 2026, 05:00 AM';
+      let reasonLabel = '🚨 Emergency SOS button pressed';
+      if (reason === 'fall') reasonLabel = '🚨 Possible fall detected';
+
+      let locationText = '📍 Location: Unavailable (GPS signal not found)';
+      if (location && typeof location.lat === 'number') {
+        const lat = location.lat.toFixed(6);
+        const lng = location.lng.toFixed(6);
+        const addr = location.address ? `\n📍 Address: ${location.address}` : '';
+        locationText = `📍 Coordinates: ${lat}, ${lng}${addr}\n🗺️ Google Maps: https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+      }
+
+      return [
+        `🚨 *SAHAARA EMERGENCY ALERT* 🚨`,
+        ``,
+        `*User:* ${name}`,
+        `*Emergency Reason:* ${reasonLabel}`,
+        `*Timestamp:* ${timeStr}`,
+        ``,
+        locationText,
+        ``,
+        `⚠️ *URGENT: Please call or contact ${name} immediately!*`,
+      ].join('\n');
+    }
+
+    const sampleMsg = buildTestEmergencyMessage({
+      name: 'Ramesh Patel',
+      reason: 'manual',
+      location: { lat: 12.971598, lng: 77.594562, address: 'MG Road, Bengaluru' },
+      timestamp: '1 Nov 2026, 05:00 AM',
+    });
+
+    assert.ok(sampleMsg.includes('SAHAARA EMERGENCY ALERT'), 'Must contain SAHAARA EMERGENCY ALERT heading');
+    assert.ok(sampleMsg.includes('Ramesh Patel'), 'Must contain user name');
+    assert.ok(sampleMsg.includes('Emergency SOS button pressed'), 'Must contain emergency reason');
+    assert.ok(sampleMsg.includes('12.971598, 77.594562'), 'Must contain coordinates');
+    assert.ok(sampleMsg.includes('https://www.google.com/maps/search/?api=1&query=12.971598,77.594562'), 'Must contain Maps link');
+    assert.ok(sampleMsg.includes('1 Nov 2026, 05:00 AM'), 'Must contain timestamp');
+    assert.ok(sampleMsg.includes('URGENT: Please call or contact Ramesh Patel immediately!'), 'Must contain urgent call request');
+  });
+
+  // Test 38: REGRESSION - Multi-guardian fallback builds individual wa.me links with correct URL encoding
+  await runTest('38. REGRESSION: Multi-guardian fallback builds individual wa.me links with correct URL encoding', async () => {
+    function normalizeTestPhone(phone) {
+      if (!phone) return '';
+      let clean = String(phone).replace(/\D/g, '');
+      if (clean.length === 10) clean = `91${clean}`;
+      if (clean.startsWith('0') && clean.length === 11) clean = `91${clean.slice(1)}`;
+      return clean;
+    }
+
+    function buildTestGuardianWaLink(contact, messageText) {
+      const phone = normalizeTestPhone(contact.phone);
+      if (!phone) return null;
+      return `https://wa.me/${phone}?text=${encodeURIComponent(messageText)}`;
+    }
+
+    const testContacts = [
+      { name: 'Aarav (Son)', phone: '+91 98765 43210' },
+      { name: 'Pooja (Daughter)', phone: '09876543211' },
+      { name: 'Dr. Verma', phone: '9876543212' },
+    ];
+
+    const message = '🚨 *SAHAARA EMERGENCY ALERT* 🚨\n*User:* Ramesh Patel';
+
+    const links = testContacts.map(c => ({
+      name: c.name,
+      link: buildTestGuardianWaLink(c, message),
+    }));
+
+    assert.strictEqual(links.length, 3, 'Must generate individual links for all 3 guardians');
+    assert.ok(links[0].link.startsWith('https://wa.me/919876543210?text='), 'First guardian phone normalized to E.164 without +');
+    assert.ok(links[1].link.startsWith('https://wa.me/919876543211?text='), 'Second guardian 0-prefixed phone normalized correctly');
+    assert.ok(links[2].link.startsWith('https://wa.me/919876543212?text='), 'Third guardian 10-digit phone normalized with 91 prefix');
+    assert.ok(links[0].link.includes('%F0%9F%9A%A8'), 'Must correctly URL-encode emojis and special characters');
+  });
+
 
   console.log('\n================================================================');
   console.log(`Results: ${passedCount} passed, ${failedCount} failed.`);

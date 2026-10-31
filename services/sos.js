@@ -182,35 +182,101 @@ export async function getEmergencyContacts() {
 }
 
 /**
- * Builds the fallback WhatsApp message and wa.me link
+ * Formats an official SAHAARA Emergency WhatsApp message:
+ * 1. SAHAARA EMERGENCY ALERT heading
+ * 2. User's name
+ * 3. Emergency reason
+ * 4. Foreground-captured location (if available)
+ * 5. Google Maps location link (if available)
+ * 6. Emergency timestamp
+ * 7. Explicit request to contact the user immediately
+ */
+export function buildEmergencyMessage({
+  name = 'Sahaara Member',
+  reason = 'manual',
+  location = null,
+  timestamp = null,
+}) {
+  const timeStr =
+    timestamp ||
+    new Date().toLocaleString('en-IN', {
+      day: 'numeric',
+      month: 'short',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+      hour12: true,
+    });
+
+  let reasonLabel = '🚨 Emergency SOS button pressed';
+  if (reason === 'fall') {
+    reasonLabel = '🚨 Possible fall detected';
+  } else if (reason === 'fall_help') {
+    reasonLabel = '🚨 Fall confirmed — User requested help';
+  } else if (reason === 'fall_noresponse') {
+    reasonLabel = '🚨 Fall detected — No response from user';
+  } else if (reason === 'fall_ok') {
+    reasonLabel = '✅ Fall alert update — User reports they are okay';
+  } else if (reason === 'test') {
+    reasonLabel = '🧪 Test alert from Sahaara app';
+  }
+
+  let locationText = '📍 Location: Unavailable (GPS signal not found)';
+  if (location && typeof location.lat === 'number' && typeof location.lng === 'number') {
+    const lat = location.lat.toFixed(6);
+    const lng = location.lng.toFixed(6);
+    const addr = location.address ? `\n📍 Address: ${location.address}` : '';
+    locationText = `📍 Coordinates: ${lat}, ${lng}${addr}\n🗺️ Google Maps: https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
+  }
+
+  return [
+    `🚨 *SAHAARA EMERGENCY ALERT* 🚨`,
+    ``,
+    `*User:* ${name}`,
+    `*Emergency Reason:* ${reasonLabel}`,
+    `*Timestamp:* ${timeStr}`,
+    ``,
+    locationText,
+    ``,
+    `⚠️ *URGENT: Please call or contact ${name} immediately!*`,
+  ].join('\n');
+}
+
+/**
+ * Builds a direct wa.me deep link for a specific contact with the prefilled emergency message.
+ */
+export function buildGuardianWaLink(contact, messageText) {
+  if (!contact || !contact.phone) return null;
+  const phone = normalizePhone(contact.phone);
+  if (!phone) return null;
+  return `https://wa.me/${phone}?text=${encodeURIComponent(messageText)}`;
+}
+
+/**
+ * Builds individual manual WhatsApp links for all registered emergency contacts.
+ */
+export function buildFallbackWaLinks(contacts = [], name, reason, location, timestamp) {
+  const message = buildEmergencyMessage({ name, reason, location, timestamp });
+  return (contacts || [])
+    .map((c) => ({
+      id: c.id || c.phone,
+      name: c.name || 'Guardian',
+      relation: c.relation || '',
+      phone: normalizePhone(c.phone),
+      rawPhone: c.phone,
+      waLink: buildGuardianWaLink(c, message),
+      messageText: message,
+    }))
+    .filter((c) => Boolean(c.phone && c.waLink));
+}
+
+/**
+ * Backward compatibility helper for primary contact
  */
 export function buildFallbackWaLink(firstContact, name, reason, location) {
   if (!firstContact || !firstContact.phone) return null;
-
-  const phone = normalizePhone(firstContact.phone);
-
-  let header = `🚨 SOS from ${name}. They pressed the SOS button and need help.`;
-  if (reason === 'test') {
-    header = `✅ Test message from Sahaara for ${name}.`;
-  } else if (reason === 'fall') {
-    header = `🚨 SOS: A possible fall was detected for ${name}.`;
-  } else if (reason === 'fall_ok') {
-    header = `✅ Update: ${name} says they are okay.`;
-  } else if (reason === 'fall_help') {
-    header = `🚨 ${name} says they need help after a fall. Please call them now.`;
-  } else if (reason === 'fall_noresponse') {
-    header = `🚨 No response from ${name} after a fall alert. Please call them now.`;
-  }
-
-  let locationText = '📍 Location not available.';
-  if (location && typeof location.lat === 'number') {
-    const lat = location.lat.toFixed(6);
-    const lng = location.lng.toFixed(6);
-    locationText = `📍 Location: ${location.address || 'Known coordinates'}\nCoordinates: ${lat}, ${lng}\nGoogle Maps: https://www.google.com/maps/search/?api=1&query=${lat},${lng}`;
-  }
-
-  const text = `${header}\n\n${locationText}`;
-  return `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+  const message = buildEmergencyMessage({ name, reason, location });
+  return buildGuardianWaLink(firstContact, message);
 }
 
 /**
@@ -253,7 +319,12 @@ export async function sendSOS({ reason = 'manual' }) {
   // 3. Fetch location
   const location = await getCurrentLocation();
 
-  // 4. Retrieve ID token using Firebase Authentication SDK
+  // 4. Build formatted emergency message and guardian fallback links
+  const emergencyMessage = buildEmergencyMessage({ name, reason, location });
+  const fallbackGuardians = buildFallbackWaLinks(contacts, name, reason, location);
+  const fallbackWaLink = fallbackGuardians[0]?.waLink || null;
+
+  // 5. Retrieve ID token using Firebase Authentication SDK
   let idToken = null;
   try {
     idToken = await user.getIdToken();
@@ -275,7 +346,9 @@ export async function sendSOS({ reason = 'manual' }) {
         errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
         location,
         contacts,
-        fallbackWaLink: buildFallbackWaLink(contacts[0] || null, name, reason, location),
+        emergencyMessage,
+        fallbackGuardians,
+        fallbackWaLink,
         results: [],
         totalContacts: contacts.length,
         acceptedCount: 0,
@@ -300,7 +373,9 @@ export async function sendSOS({ reason = 'manual' }) {
       errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
       location,
       contacts,
-      fallbackWaLink: buildFallbackWaLink(contacts[0] || null, name, reason, location),
+      emergencyMessage,
+      fallbackGuardians,
+      fallbackWaLink,
       results: [],
       totalContacts: contacts.length,
       acceptedCount: 0,
@@ -312,7 +387,7 @@ export async function sendSOS({ reason = 'manual' }) {
     };
   }
 
-  // 5. Prepare payload for /api/sos
+  // 6. Prepare payload for /api/sos
   const payload = {
     name,
     reason,
@@ -324,9 +399,6 @@ export async function sendSOS({ reason = 'manual' }) {
       key: c.callmebotKey || '',
     })),
   };
-
-  const firstContact = contacts[0] || null;
-  const fallbackWaLink = buildFallbackWaLink(firstContact, name, reason, location);
 
   try {
     const baseUrl = getApiBaseUrl();
@@ -360,6 +432,8 @@ export async function sendSOS({ reason = 'manual' }) {
         errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
         location,
         contacts,
+        emergencyMessage,
+        fallbackGuardians,
         fallbackWaLink,
         results: [],
         totalContacts: contacts.length,
@@ -382,6 +456,8 @@ export async function sendSOS({ reason = 'manual' }) {
       results: data.results || [],
       location,
       contacts,
+      emergencyMessage,
+      fallbackGuardians,
       fallbackWaLink,
       error: data.error,
       errorCode: data.errorCode,
@@ -401,6 +477,8 @@ export async function sendSOS({ reason = 'manual' }) {
       results: [],
       location,
       contacts,
+      emergencyMessage,
+      fallbackGuardians,
       fallbackWaLink,
       error: err.message,
       provider: 'twilio_whatsapp',

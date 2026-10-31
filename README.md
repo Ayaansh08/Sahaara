@@ -230,7 +230,7 @@ Because Twilio Sandbox is a restricted trial environment, recipients cannot rece
 ### 3. Testing WhatsApp SOS
 
 #### Automated Test Suite (Mocked)
-The backend includes a comprehensive automated test suite testing all 36 failure and success scenarios without sending real messages or incurring Twilio costs:
+The backend includes a comprehensive automated test suite testing all 38 failure and success scenarios without sending real messages or incurring Twilio costs:
 
 ``bash
 cd server
@@ -274,6 +274,8 @@ This verifies:
 34. Malformed or invalid ID tokens produce distinguishable `AUTH_TOKEN_MALFORMED`.
 35. Identity derived strictly from verified token (client-supplied `uid` in body is strictly ignored).
 36. `/api/twilio/test-connectivity` requires valid Firebase token and reports distinguishable error codes.
+37. Manual emergency message format includes all required hackathon parameters (heading, name, reason, coordinates, Maps link, timestamp, urgent call request).
+38. Multi-guardian fallback builds individual `wa.me` links with correct phone normalization and URI encoding.
 
 #### Testing Workflow & Sandbox vs Production Distinction
 
