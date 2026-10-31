@@ -1,8 +1,7 @@
 /**
  * app/emergency-contacts.js
  * Emergency Contacts Management Screen for Sahaara.
- *
- * NOTE: Storing the CallMeBot API key in Firestore is for the hackathon demo only.
+ * Connects with Meta WhatsApp Business Cloud API backend for instant alerts.
  */
 
 import React, { useState, useEffect } from 'react';
@@ -131,8 +130,15 @@ export default function EmergencyContactsScreen() {
       setFormError(isHindi ? 'कृपया फ़ोन नंबर लिखें' : 'Please enter a phone number');
       return;
     }
-    if (!trimmedKey) {
-      setFormError(isHindi ? 'कृपया CallMeBot कुंजी दर्ज करें' : 'Please enter CallMeBot key');
+
+    // Phone number validation: must have at least 10 digits
+    const digitsOnly = trimmedPhone.replace(/\D/g, '');
+    if (digitsOnly.length < 10) {
+      setFormError(
+        isHindi
+          ? 'कृपया कम से कम 10 अंकों का मान्य फ़ोन नंबर लिखें'
+          : 'Please enter a valid phone number (at least 10 digits)'
+      );
       return;
     }
 
@@ -197,14 +203,13 @@ export default function EmergencyContactsScreen() {
 
   const handleSendTestMessage = async () => {
     const trimmedPhone = phone.trim();
-    const trimmedKey = callmebotKey.trim();
 
-    if (!trimmedPhone || !trimmedKey) {
+    if (!trimmedPhone) {
       setTestStatus('error');
       setTestErrorMsg(
         isHindi
-          ? 'कृपया पहले फ़ोन नंबर और कुंजी दर्ज करें'
-          : 'Please enter phone and key first'
+          ? 'कृपया पहले फ़ोन नंबर दर्ज करें'
+          : 'Please enter phone number first'
       );
       return;
     }
@@ -223,7 +228,7 @@ export default function EmergencyContactsScreen() {
         body: JSON.stringify({
           name: elderName,
           reason: 'test',
-          contacts: [{ phone: trimmedPhone, key: trimmedKey }],
+          contacts: [{ phone: trimmedPhone, name: name.trim() || 'Guardian' }],
         }),
       });
 
@@ -411,26 +416,28 @@ export default function EmergencyContactsScreen() {
                 style={styles.fieldGap}
               />
 
-              {/* CallMeBot Key field */}
+              {/* Optional CallMeBot Key field (retained for backward compatibility) */}
               <ThemedTextField
-                label={t('contacts.keyLabel')}
+                label={`${t('contacts.keyLabel')} (${isHindi ? 'वैकल्पिक' : 'Optional'})`}
                 lang={lang}
                 value={callmebotKey}
                 onChangeText={setCallmebotKey}
-                placeholder={isHindi ? 'उदा. 123456' : 'e.g. 123456'}
+                placeholder={isHindi ? 'उदा. 123456 (यदि हो)' : 'e.g. 123456 (if any)'}
                 iconName="key-outline"
                 style={styles.fieldGap}
               />
 
               {/* Plain 18px Help Text */}
               <View style={styles.helpBox}>
-                <Ionicons name="chatbubbles-outline" size={24} color={colors.primary} />
+                <Ionicons name="logo-whatsapp" size={24} color="#25D366" />
                 <Text style={[textStyle('label', lang, colors.inkSoft), styles.helpText]}>
-                  {t('contacts.keyHelp')}
+                  {isHindi
+                    ? 'आपातकालीन अलर्ट सीधे व्हाट्सएप के माध्यम से आपके पंजीकृत अभिभावकों को भेजे जाते हैं।'
+                    : 'Emergency WhatsApp alerts and GPS location are sent directly to your registered contacts.'}
                 </Text>
               </View>
 
-              {/* Send Test Message Button (especially useful when editing or validating) */}
+              {/* Send Test Message Button */}
               <View style={styles.testSection}>
                 <ThemedButton
                   label={
@@ -441,7 +448,7 @@ export default function EmergencyContactsScreen() {
                   variant="secondary"
                   iconName="paper-plane-outline"
                   loading={testStatus === 'sending'}
-                  disabled={testStatus === 'sending' || !phone || !callmebotKey}
+                  disabled={testStatus === 'sending' || !phone}
                   onPress={handleSendTestMessage}
                 />
 
@@ -708,6 +715,7 @@ const styles = StyleSheet.create({
   },
   helpBox: {
     flexDirection: 'row',
+    alignItems: 'center',
     gap: spacing.sm,
     backgroundColor: colors.paperDeep,
     borderRadius: radius.card,
@@ -718,8 +726,8 @@ const styles = StyleSheet.create({
   },
   helpText: {
     flex: 1,
-    fontSize: 18,
-    lineHeight: 26,
+    fontSize: 16,
+    lineHeight: 22,
   },
   testSection: {
     marginBottom: spacing.lg,

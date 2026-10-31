@@ -1,10 +1,10 @@
 /**
  * components/SosModal.js
  * Calm senior-first two-step emergency confirm modal.
- * Integrates WhatsApp emergency alert via CallMeBot backend & GPS location.
+ * Integrates WhatsApp emergency alert via Meta WhatsApp Cloud API backend & foreground GPS location.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -48,6 +48,10 @@ export default function SosModal({ visible, onClose }) {
   const [resultState, setResultState] = useState(null); // 'success' | 'failure'
   const [sosResult, setSosResult] = useState(null);
 
+  // Debouncing & double-click protection ref
+  const isTriggeringRef = useRef(false);
+  const lastTriggerTimeRef = useRef(0);
+
   useEffect(() => {
     if (visible) {
       setCheckingContacts(true);
@@ -82,22 +86,35 @@ export default function SosModal({ visible, onClose }) {
   };
 
   const handleConfirmSos = async () => {
+    const now = Date.now();
+    // Prevent accidental rapid multiple taps / duplicate submissions
+    if (isTriggeringRef.current || (now - lastTriggerTimeRef.current < 8000)) {
+      console.log('[SOS Modal] Ignoring rapid duplicate trigger');
+      return;
+    }
+    isTriggeringRef.current = true;
+    lastTriggerTimeRef.current = now;
+
     setLoading(true);
     setStep('locating');
 
     try {
-      // Step: sending
+      // Step feedback: locating -> sending
       setTimeout(() => {
         setStep('sending');
-      }, 2500);
+      }, 2000);
 
       const result = await sendSOS({ reason: 'manual' });
       setSosResult(result);
 
-      // Caretaker portal backwards compatibility in Firestore
+      // Record full SOS event in Firestore sos_alerts
       try {
         if (db) {
           const user = auth.currentUser;
+          const calculatedStatus = result.overallStatus || (result.ok
+            ? (result.acceptedAll ? 'ACCEPTED_ALL' : 'PARTIALLY_ACCEPTED')
+            : 'FAILED');
+
           await addDoc(collection(db, 'sos_alerts'), {
             userId: user?.uid || 'unknown',
             userEmail: user?.email || 'unknown@sahaara.app',
@@ -110,30 +127,33 @@ export default function SosModal({ visible, onClose }) {
               : null,
             locationAvailable: !!result.location,
             address: result.location?.address ?? null,
-            status: 'TRIGGERED',
+            status: calculatedStatus,
+            overallStatus: calculatedStatus,
+            whatsappStatus: calculatedStatus,
+            guardianResults: result.results || [],
             message: 'Manual SOS alert triggered via Sahaara app',
             timestamp: serverTimestamp(),
             contacts: contacts.map((c) => c.name),
-            deliverySuccess: result.ok,
+            provider: result.provider || 'meta_cloud_api',
           });
         }
       } catch (fbErr) {
         console.log('[SOS Modal] Firebase alert doc write error:', fbErr.message);
       }
 
-      // Local notification feedback
+      // Local notification feedback on senior's device
       if (!isExpoGo) {
         try {
           await Notifications.scheduleNotificationAsync({
             content: {
-              title: isHindi ? '🆘 SOS अलर्ट भेजा गया' : '🆘 SOS Alert Sent',
+              title: isHindi ? '🆘 SOS अलर्ट स्वीकार हुआ' : '🆘 SOS Alert Accepted',
               body: result.location
                 ? isHindi
-                  ? 'स्थान देखभालकर्ताओं को भेजा गया। शांत रहें, मदद आ रही है।'
-                  : 'Your location sent to emergency contacts. Help is on the way.'
+                  ? 'स्थान सहित अलर्ट अनुरोध स्वीकार कर लिया गया। शांत रहें, मदद आ रही है।'
+                  : 'Your emergency alert was accepted by WhatsApp. Help is on the way.'
                 : isHindi
-                ? 'देखभालकर्ताओं को सूचित किया गया।'
-                : 'Emergency contacts have been notified.',
+                ? 'देखभालकर्ताओं के लिए अलर्ट अनुरोध स्वीकार कर लिया गया।'
+                : 'Emergency alert accepted for contacts.',
               sound: true,
               priority: Notifications.AndroidNotificationPriority.MAX,
             },
@@ -150,6 +170,7 @@ export default function SosModal({ visible, onClose }) {
       setStep('result');
     } finally {
       setLoading(false);
+      isTriggeringRef.current = false;
     }
   };
 
@@ -241,8 +262,8 @@ export default function SosModal({ visible, onClose }) {
 
               <Text style={[textStyle('body', lang, colors.inkSoft), styles.subText]}>
                 {isHindi
-                  ? 'आपके आपातकालीन संपर्कों को तुरंत व्हाट्सएप पर आपका स्थान और संदेश भेजा जाएगा।'
-                  : 'Your emergency contacts will be notified immediately via WhatsApp with your location.'}
+                  ? 'आपके सभी आपातकालीन संपर्कों को तुरंत व्हाट्सएप पर आपका स्थान और संदेश भेजा जाएगा।'
+                  : 'All your emergency contacts will be notified immediately via WhatsApp with your location.'}
               </Text>
 
               {/* Contacts preview */}
@@ -260,7 +281,7 @@ export default function SosModal({ visible, onClose }) {
                   <Text style={[textStyle('label', lang, colors.primary), styles.stepText]}>
                     {step === 'locating'
                       ? (isHindi ? 'स्थान खोज रहे हैं...' : 'Getting your location...')
-                      : (isHindi ? 'अलर्ट भेज रहे हैं...' : 'Sending WhatsApp alert...')}
+                      : (isHindi ? 'व्हाट्सएप अलर्ट भेज रहे हैं...' : 'Sending WhatsApp alert to contacts...')}
                   </Text>
                 </View>
               )}
@@ -313,24 +334,39 @@ export default function SosModal({ visible, onClose }) {
               </View>
 
               <Text style={[textStyle('heading', lang, colors.calm), styles.title]}>
-                {isHindi ? 'मदद का संदेश भेज दिया गया' : 'Help alert sent'}
+                {sosResult?.overallStatus === 'PARTIALLY_ACCEPTED'
+                  ? (isHindi ? 'अलर्ट आंशिक रूप से स्वीकार हुआ' : 'Alert Partially Accepted')
+                  : (isHindi ? 'आपातकालीन अलर्ट स्वीकार हुआ' : 'Emergency Alert Accepted')}
               </Text>
 
               <View style={[styles.goldBar, { backgroundColor: colors.calm }]} />
 
               <Text style={[textStyle('body', lang, colors.inkSoft), styles.subText]}>
-                {isHindi
-                  ? 'आपके संपर्कों को व्हाट्सएप पर संदेश और स्थान भेज दिया गया है।'
-                  : 'Your emergency contacts have been notified via WhatsApp with your location.'}
+                {sosResult?.overallStatus === 'PARTIALLY_ACCEPTED'
+                  ? (isHindi
+                      ? 'व्हाट्सएप ने कुछ संपर्कों के लिए अलर्ट स्वीकार किया है, लेकिन कुछ विफल रहे।'
+                      : 'WhatsApp accepted the alert for some contacts, but some requests failed.')
+                  : (isHindi
+                      ? 'व्हाट्सएप ने आपके सभी संपर्कों के लिए आपातकालीन संदेश स्वीकार कर लिया है।'
+                      : 'WhatsApp has accepted the alert request for all your registered contacts.')}
               </Text>
 
-              {/* Reached contacts */}
+              {/* Reached / Accepted contacts */}
               <View style={styles.reachedBox}>
                 <Text style={[textStyle('label', lang, colors.calm), { fontFamily: fonts.bodyStrong }]}>
-                  {isHindi ? 'संदेश भेजा गया:' : 'Contacts reached:'}
+                  {isHindi ? 'संपर्क स्थिति (मेटा एपीआई):' : 'Contact Status (Meta API):'}
                 </Text>
                 <Text style={[textStyle('body', lang, colors.ink), { marginTop: 4 }]}>
-                  {contacts.map((c) => `• ${c.name} (${c.relation || 'Contact'})`).join('\n')}
+                  {contacts.map((c) => {
+                    const match = sosResult?.results?.find(
+                      (r) => r.rawPhone === c.phone || r.name === c.name
+                    );
+                    const isAccepted = match?.accepted;
+                    const statusTag = isAccepted
+                      ? (isHindi ? '✓ स्वीकृत' : '✓ Accepted')
+                      : (isHindi ? '✗ विफल' : '✗ Failed');
+                    return `• ${c.name} (${c.relation || 'Contact'}) — ${statusTag}`;
+                  }).join('\n')}
                 </Text>
               </View>
 
@@ -355,7 +391,16 @@ export default function SosModal({ visible, onClose }) {
                     </Text>
                   </TouchableOpacity>
                 </View>
-              ) : null}
+              ) : (
+                <View style={styles.locationBox}>
+                  <View style={styles.locationRow}>
+                    <Ionicons name="location-outline" size={20} color={colors.inkSoft} />
+                    <Text style={[textStyle('label', lang, colors.inkSoft), { flex: 1, marginLeft: 6 }]}>
+                      {isHindi ? 'स्थान उपलब्ध नहीं (अलर्ट संपर्कों को भेजा गया)' : 'Location unavailable (alert was sent to contacts)'}
+                    </Text>
+                  </View>
+                </View>
+              )}
 
               <TouchableOpacity
                 style={styles.closeBtn}
@@ -383,9 +428,19 @@ export default function SosModal({ visible, onClose }) {
 
               <Text style={[textStyle('body', lang, colors.inkSoft), styles.subText]}>
                 {isHindi
-                  ? 'नेटवर्क की समस्या के कारण स्वचालित अलर्ट नहीं भेजा जा सका। कृपया नीचे दिए गए बटन से सीधे व्हाट्सएप खोलकर संदेश भेजें।'
-                  : 'Could not send the automatic alert due to network issue. Please send manually using the WhatsApp button below.'}
+                  ? 'नेटवर्क या सर्वर समस्या के कारण स्वचालित अलर्ट नहीं भेजा जा सका। कृपया नीचे दिए गए बटन से सीधे व्हाट्सएप खोलकर संदेश भेजें।'
+                  : 'Could not send the automatic alert due to a network or server issue. Please send manually using the WhatsApp button below.'}
               </Text>
+
+              {/* Informative error snippet if available */}
+              {sosResult?.error ? (
+                <View style={styles.errorSnippetBox}>
+                  <Ionicons name="alert-outline" size={18} color={colors.dangerText} />
+                  <Text style={[textStyle('label', lang, colors.dangerText), styles.errorSnippetText]}>
+                    {sosResult.error}
+                  </Text>
+                </View>
+              ) : null}
 
               {sosResult?.fallbackWaLink ? (
                 <TouchableOpacity
@@ -576,6 +631,21 @@ const styles = StyleSheet.create({
     textDecorationLine: 'underline',
     fontSize: 18,
     lineHeight: 24,
+  },
+  errorSnippetBox: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.xs,
+    backgroundColor: colors.dangerSoft,
+    padding: spacing.sm,
+    borderRadius: radius.button,
+    marginBottom: spacing.md,
+    width: '100%',
+  },
+  errorSnippetText: {
+    flex: 1,
+    fontSize: 14,
+    lineHeight: 18,
   },
   closeBtn: {
     width: '100%',

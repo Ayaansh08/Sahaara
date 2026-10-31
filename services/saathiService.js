@@ -1,18 +1,45 @@
 import { Platform } from 'react-native';
+import Constants from 'expo-constants';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { auth } from '../firebase/config';
 import { transliterateToHindi } from './transliterate';
 
-const API_URL = 'http://192.168.1.105:3000';
-// Configurable API URL (Supports EXPO_PUBLIC_SAATHI_API_URL or default local dev)
+/**
+ * Returns the SAATHI backend API URL.
+ * Priority:
+ * 1. process.env.EXPO_PUBLIC_SAATHI_API_URL (explicitly set via .env)
+ * 2. Dynamic host detection from Expo's Metro server (auto-detects dev machine LAN IP)
+ * 3. Android Emulator fallback (10.0.2.2:3000)
+ * 4. Localhost fallback (http://localhost:3000)
+ */
 export const getApiBaseUrl = () => {
-  if (process.env.EXPO_PUBLIC_SAATHI_API_URL) {
-    return process.env.EXPO_PUBLIC_SAATHI_API_URL;
+  const envUrl = process.env.EXPO_PUBLIC_SAATHI_API_URL || process.env.EXPO_PUBLIC_BACKEND_URL;
+  if (envUrl) {
+    return envUrl.replace(/\/+$/, '');
   }
+
+  // Attempt to detect dev machine IP from Expo Constants when running in development
+  try {
+    const hostUri =
+      Constants.expoConfig?.hostUri ||
+      Constants.manifest2?.extra?.expoGo?.debuggerHost ||
+      Constants.manifest?.debuggerHost;
+
+    if (hostUri) {
+      const ip = hostUri.split(':')[0];
+      if (ip && ip !== 'localhost' && ip !== '127.0.0.1') {
+        return `http://${ip}:3000`;
+      }
+    }
+  } catch (_) {
+    // Ignore and fallback below
+  }
+
   // Android Emulator uses 10.0.2.2 to connect to host machine localhost
   if (Platform.OS === 'android') {
-    return API_URL;
+    return 'http://10.0.2.2:3000';
   }
+
   // Web / iOS / Local default
   return 'http://localhost:3000';
 };

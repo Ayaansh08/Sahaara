@@ -1,7 +1,8 @@
 /**
  * services/sos.js
  * SOS Alert & Location Service for Sahaara.
- * Communicates with backend /api/sos (WhatsApp via CallMeBot) and handles GPS capture.
+ * Communicates with backend /api/sos (official Meta WhatsApp Business Cloud API)
+ * and handles foreground GPS capture with 3-tier fallback.
  */
 
 import * as Location from 'expo-location';
@@ -189,8 +190,10 @@ export async function sendSOS({ reason = 'manual' }) {
     reason,
     location,
     contacts: contacts.map(c => ({
+      name: c.name,
       phone: c.phone,
-      key: c.callmebotKey,
+      relation: c.relation,
+      key: c.callmebotKey || '',
     })),
   };
 
@@ -214,21 +217,31 @@ export async function sendSOS({ reason = 'manual' }) {
     const data = await res.json();
     return {
       ok: data.ok || false,
+      overallStatus: data.overallStatus || (data.ok ? (data.acceptedAll ? 'ACCEPTED_ALL' : 'PARTIALLY_ACCEPTED') : 'FAILED'),
+      acceptedAll: data.acceptedAll || false,
+      acceptedCount: data.acceptedCount || 0,
+      totalContacts: data.totalContacts || contacts.length,
       results: data.results || [],
       location,
       contacts,
       fallbackWaLink,
       error: data.error,
+      provider: data.provider || 'meta_cloud_api',
     };
   } catch (err) {
     console.log('[SOS Service] Backend call failed:', err.message);
     return {
       ok: false,
+      overallStatus: 'FAILED',
+      acceptedAll: false,
+      acceptedCount: 0,
+      totalContacts: contacts.length,
       results: [],
       location,
       contacts,
       fallbackWaLink,
       error: err.message,
+      provider: 'meta_cloud_api',
     };
   }
 }

@@ -25,6 +25,13 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
 const WHISPER_MODEL = 'whisper-large-v3';
 
+// Meta WhatsApp Business Cloud API Configuration (Graph API v22.0)
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+const WHATSAPP_API_VERSION = process.env.WHATSAPP_API_VERSION || 'v22.0';
+const WHATSAPP_TEMPLATE_NAME = process.env.WHATSAPP_TEMPLATE_NAME || 'sahaara_emergency_alert';
+const WHATSAPP_TEMPLATE_LANG = process.env.WHATSAPP_TEMPLATE_LANG || 'en_US';
+
 app.use(cors());
 app.use(express.json());
 
@@ -178,12 +185,11 @@ CORRECT:
 
 Do not use the generic acknowledgement as the default response.`;
 
-// 1. New Greet Endpoint
+// 1. Greet Endpoint
 app.post('/api/saathi/greet', async (req, res) => {
   try {
     const userName = getUserNameFromToken(req);
     
-    // We could call the LLM here, but for latency, a dynamic scripted greeting is much faster.
     const hour = new Date().getHours();
     let greeting = 'Namaste';
     if (hour < 12) greeting = 'Shubh prabhat';
@@ -204,7 +210,7 @@ app.post('/api/saathi/greet', async (req, res) => {
   }
 });
 
-// 2. New Voice Chat Endpoint
+// 2. Voice Chat Endpoint
 app.post('/api/saathi/voice', upload.single('audio'), async (req, res) => {
   try {
     if (!req.file) {
@@ -252,7 +258,6 @@ app.post('/api/saathi/voice', upload.single('audio'), async (req, res) => {
     const transcript = (sttData.text || '').trim();
     
     if (!transcript) {
-      // Empty transcript fallback
       const reply = "Maaf kijiye, main theek se sun nahi payi. Kya aap phir se bolenge?";
       const audioBase64 = await generateSpeech(reply);
       return res.json({ transcript: "", reply, audioBase64 });
@@ -293,7 +298,6 @@ app.post('/api/saathi/voice', upload.single('audio'), async (req, res) => {
     const rawContent = llmData?.choices?.[0]?.message?.content;
     const replyText = rawContent?.trim() || "मैं आपकी बात सुन रही हूँ, थोड़ा और बताइए।";
     
-    // Temporarily add safe server-side logging of the LLM result
     console.log(`[SAATHI LLM] User: ${transcript}`);
     console.log(`[SAATHI LLM] Raw response: ${rawContent}`);
     console.log(`[SAATHI LLM] Final reply: ${replyText}`);
@@ -386,7 +390,7 @@ app.post('/api/transliterate', async (req, res) => {
   }
 });
 
-// ─── Emergency WhatsApp SOS Endpoint (CallMeBot) ──────────────────────────
+// ─── Emergency WhatsApp SOS Endpoint (Meta WhatsApp Business Cloud API) ────
 const sosRateLimits = new Map();
 
 function normalizePhoneNumber(raw) {
@@ -399,6 +403,115 @@ function normalizePhoneNumber(raw) {
     cleaned = '91' + cleaned;
   }
   return cleaned;
+}
+
+/**
+ * Sends an emergency alert message via Meta WhatsApp Business Cloud API
+ * using an approved WhatsApp UTILITY template.
+ * Never silently falls back to ordinary text messages.
+ * Distinguishes API acceptance from rejection.
+ */
+async function sendMetaWhatsAppTemplateMessage({ toPhone, templateName, templateLang, templateParams }) {
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+    return {
+      accepted: false,
+      status: 'CONFIG_ERROR',
+      error: 'WHATSAPP_ACCESS_TOKEN or WHATSAPP_PHONE_NUMBER_ID is not configured in server environment',
+    };
+  }
+
+  if (!templateName) {
+    return {
+      accepted: false,
+      status: 'TEMPLATE_MISSING',
+      error: 'WhatsApp utility template configuration missing: WHATSAPP_TEMPLATE_NAME is required for emergency alerts',
+    };
+  }
+
+  const endpoint = `https://graph.facebook.com/${WHATSAPP_API_VERSION}/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
+
+  // Build standard Meta Utility Template payload
+  // Expected template parameter order:
+  // {{1}} = User Name
+  // {{2}} = Emergency Alert Message
+  // {{3}} = Location / Address
+  // {{4}} = Google Maps Link
+  // {{5}} = Timestamp
+  const payload = {
+    messaging_product: 'whatsapp',
+    recipient_type: 'individual',
+    to: toPhone,
+    type: 'template',
+    template: {
+      name: templateName,
+      language: { code: templateLang || 'en_US' },
+      components: [
+        {
+          type: 'body',
+          parameters: [
+            { type: 'text', text: templateParams.name || 'Sahaara Member' },
+            { type: 'text', text: templateParams.emergencyMessage || 'Emergency help requested via Sahaara SOS' },
+            { type: 'text', text: templateParams.locationText || 'Location unavailable' },
+            { type: 'text', text: templateParams.mapsLink || 'No coordinates available' },
+            { type: 'text', text: templateParams.timeString || 'Recently' },
+          ],
+        },
+      ],
+    },
+  };
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 12000);
+
+  try {
+    const metaRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    const resJson = await metaRes.json().catch(() => null);
+
+    if (metaRes.ok && resJson?.messages?.[0]?.id) {
+      return {
+        accepted: true,
+        status: 'ACCEPTED',
+        messageId: resJson.messages[0].id,
+        waId: resJson.contacts?.[0]?.wa_id || toPhone,
+        httpStatus: metaRes.status,
+      };
+    } else {
+      const errorMsg =
+        resJson?.error?.message ||
+        `Meta API returned HTTP status ${metaRes.status}`;
+      const errorCode = resJson?.error?.code;
+      const errorSubcode = resJson?.error?.error_subcode;
+      console.warn(`[SOS Meta API] Template delivery rejected for ${toPhone}: ${errorMsg} (code: ${errorCode}, subcode: ${errorSubcode})`);
+      
+      return {
+        accepted: false,
+        status: 'REJECTED',
+        error: errorMsg,
+        code: errorCode,
+        errorSubcode: errorSubcode,
+        httpStatus: metaRes.status,
+      };
+    }
+  } catch (err) {
+    clearTimeout(timeoutId);
+    const isTimeout = err.name === 'AbortError';
+    console.error(`[SOS Meta API] Network/Timeout error sending to ${toPhone}:`, err.message);
+    return {
+      accepted: false,
+      status: isTimeout ? 'TIMEOUT' : 'NETWORK_ERROR',
+      error: isTimeout ? 'Request timed out after 12s' : err.message,
+    };
+  }
 }
 
 app.post('/api/sos', async (req, res) => {
@@ -414,7 +527,7 @@ app.post('/api/sos', async (req, res) => {
     const clientIp = req.headers['x-forwarded-for'] || req.socket.remoteAddress || 'unknown';
     const now = Date.now();
     const isUrgent = (reason === 'manual' || reason === 'fall');
-    const cooldownMs = isUrgent ? 30000 : 3000;
+    const cooldownMs = isUrgent ? 15000 : 3000;
 
     const limitRecord = sosRateLimits.get(clientIp) || { lastUrgent: 0, lastQuick: 0 };
     const lastTimestamp = isUrgent ? limitRecord.lastUrgent : limitRecord.lastQuick;
@@ -434,7 +547,39 @@ app.post('/api/sos', async (req, res) => {
     }
     sosRateLimits.set(clientIp, limitRecord);
 
-    // Validate location: lat between -90 and 90, lng between -180 and 180
+    // 1. Check Meta WhatsApp credentials configuration upfront
+    if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID) {
+      console.warn('[SOS] Meta WhatsApp Cloud API credentials missing in server/.env');
+      return res.status(503).json({
+        ok: false,
+        configured: false,
+        overallStatus: 'FAILED',
+        error: 'Meta WhatsApp Business Cloud API is not configured on the server. Please set WHATSAPP_ACCESS_TOKEN and WHATSAPP_PHONE_NUMBER_ID in server/.env',
+        results: [],
+        requiredConfig: {
+          WHATSAPP_ACCESS_TOKEN: 'System User or Graph API Access Token with whatsapp_business_messaging permission',
+          WHATSAPP_PHONE_NUMBER_ID: 'Phone Number ID from Meta App Dashboard > WhatsApp > API Setup',
+          WHATSAPP_API_VERSION: WHATSAPP_API_VERSION,
+          WHATSAPP_TEMPLATE_NAME: WHATSAPP_TEMPLATE_NAME,
+        },
+      });
+    }
+
+    // 2. Check WhatsApp Template configuration — never silently fall back to raw text
+    const activeTemplateName = WHATSAPP_TEMPLATE_NAME ? WHATSAPP_TEMPLATE_NAME.trim() : '';
+    if (!activeTemplateName) {
+      console.warn('[SOS] WHATSAPP_TEMPLATE_NAME is missing or empty in server environment');
+      return res.status(400).json({
+        ok: false,
+        configured: false,
+        templateMissing: true,
+        overallStatus: 'FAILED',
+        error: 'WhatsApp utility template configuration missing: WHATSAPP_TEMPLATE_NAME must be set to an approved Meta utility template (e.g. sahaara_emergency_alert) in server/.env.',
+        results: [],
+      });
+    }
+
+    // 3. Validate location (lat between -90 and 90, lng between -180 and 180)
     let validLocation = null;
     if (
       location &&
@@ -456,31 +601,6 @@ app.post('/api/sos', async (req, res) => {
       };
     }
 
-    // Build location block
-    let locationBlock = '';
-    if (validLocation) {
-      const latStr = validLocation.lat.toFixed(6);
-      const lngStr = validLocation.lng.toFixed(6);
-      const addressLine = validLocation.address
-        ? `📍 Location: ${validLocation.address}`
-        : '📍 Location: Known coordinates';
-      const coordsLine = `Coordinates: ${latStr}, ${lngStr}`;
-      const accuracyLine = validLocation.accuracy
-        ? `Accuracy: about ${Math.round(validLocation.accuracy)} m`
-        : null;
-      const mapsLine = `Open in Google Maps: https://www.google.com/maps/search/?api=1&query=${latStr},${lngStr}`;
-      const ageLine =
-        validLocation.ageSec && validLocation.ageSec > 120
-          ? `(last known location, ${Math.round(validLocation.ageSec / 60)} min old)`
-          : null;
-
-      locationBlock = [addressLine, coordsLine, accuracyLine, mapsLine, ageLine]
-        .filter(Boolean)
-        .join('\n');
-    } else {
-      locationBlock = '📍 Location not available. Please call them.';
-    }
-
     // Current time in IST
     const istTime = new Date().toLocaleString('en-IN', {
       timeZone: 'Asia/Kolkata',
@@ -492,107 +612,148 @@ app.post('/api/sos', async (req, res) => {
       year: 'numeric',
     });
 
-    // Message reason template
-    let reasonText = '';
+    // Build location summary & Google Maps link
+    let mapsUrl = 'No coordinates available';
+    let locationSummary = 'Location unavailable (GPS off or weak signal)';
+
+    if (validLocation) {
+      const latStr = validLocation.lat.toFixed(6);
+      const lngStr = validLocation.lng.toFixed(6);
+      mapsUrl = `https://www.google.com/maps/search/?api=1&query=${latStr},${lngStr}`;
+      locationSummary = validLocation.address
+        ? `${validLocation.address} (${latStr}, ${lngStr})`
+        : `Coordinates: ${latStr}, ${lngStr}`;
+    }
+
+    // Template emergency message parameter based on trigger reason
+    let emergencyMessage = '';
     switch (reason) {
       case 'manual':
-        reasonText = `🚨 SOS from ${name}. They pressed the SOS button and need help.`;
+        emergencyMessage = 'Pressed the SOS button and needs immediate emergency assistance!';
         break;
       case 'test':
-        reasonText = `✅ Test message from Sahaara for ${name}. Your alerts are set up correctly.`;
+        emergencyMessage = 'System test message — verifying emergency alert connectivity.';
         break;
       case 'fall':
-        reasonText = `🚨 SOS: A possible fall was detected for ${name}.`;
+        emergencyMessage = 'Possible fall detected! Please call or check on them immediately.';
         break;
       case 'fall_ok':
-        reasonText = `✅ Update: ${name} says they are okay.`;
+        emergencyMessage = 'Update: Senior confirmed they are okay after fall check.';
         break;
       case 'fall_help':
-        reasonText = `🚨 ${name} says they need help after a fall. Please call them now.`;
+        emergencyMessage = 'Senior indicated they need help after a fall! Please call now.';
         break;
       case 'fall_noresponse':
-        reasonText = `🚨 No response from ${name} after a fall alert. Please call them or check on them now.`;
+        emergencyMessage = 'No response after a fall alert! Please call or check on them immediately.';
         break;
     }
 
-    const fullMessage = `${reasonText}\nTime: ${istTime} IST\n\n${locationBlock}`;
-
-    // Target contacts
+    // Target contacts - extract and normalize
     let targetContacts = [];
     if (Array.isArray(contacts) && contacts.length > 0) {
       targetContacts = contacts
         .map(c => ({
+          name: c.name || 'Guardian',
           phone: normalizePhoneNumber(c.phone),
-          key: c.key || c.callmebotKey || '',
+          relation: c.relation || '',
         }))
-        .filter(c => c.phone && c.key);
-    }
-
-    if (targetContacts.length === 0 && process.env.CALLMEBOT_PHONE && process.env.CALLMEBOT_KEY) {
-      targetContacts.push({
-        phone: normalizePhoneNumber(process.env.CALLMEBOT_PHONE),
-        key: process.env.CALLMEBOT_KEY,
-      });
+        .filter(c => c.phone && c.phone.length >= 7);
     }
 
     if (targetContacts.length === 0) {
-      console.log(`[SOS] Alert (${reason}) for ${name}: No contacts or CallMeBot keys provided.`);
-      return res.json({
+      console.log(`[SOS] Alert (${reason}) for ${name}: No valid emergency contacts provided.`);
+      return res.status(400).json({
         ok: false,
-        error: 'No valid emergency contacts configured',
+        overallStatus: 'FAILED',
+        error: 'No valid emergency contacts configured. Please add emergency contacts with valid phone numbers.',
         results: [],
       });
     }
 
-    console.log(`[SOS] Alert (${reason}) sending to ${targetContacts.length} contact(s) for member "${name}".`);
+    console.log(`[SOS Meta API] Sending utility template "${activeTemplateName}" (${WHATSAPP_TEMPLATE_LANG}) to ${targetContacts.length} contact(s) for "${name}".`);
 
+    // Process all contacts individually — failure on one does not block others
     const results = [];
     for (let i = 0; i < targetContacts.length; i++) {
       const contact = targetContacts[i];
       const maskedPhone = contact.phone.length >= 4 ? `...${contact.phone.slice(-4)}` : '****';
-      let sent = false;
 
-      try {
-        const url = `https://api.callmebot.com/whatsapp.php?phone=${contact.phone}&text=${encodeURIComponent(fullMessage)}&apikey=${encodeURIComponent(contact.key)}`;
-
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000);
-
-        const callmeRes = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
-
-        const resText = await callmeRes.text();
-        if (callmeRes.ok && !resText.toLowerCase().includes('error')) {
-          sent = true;
-        } else {
-          console.log(`[SOS] CallMeBot response for ${maskedPhone}: status=${callmeRes.status}`);
-        }
-      } catch (err) {
-        console.log(`[SOS] Error reaching CallMeBot for ${maskedPhone}:`, err.name === 'AbortError' ? 'Timeout' : err.message);
-      }
-
-      results.push({
-        phone: contact.phone.slice(-4),
-        sent,
+      const sendResult = await sendMetaWhatsAppTemplateMessage({
+        toPhone: contact.phone,
+        templateName: activeTemplateName,
+        templateLang: WHATSAPP_TEMPLATE_LANG,
+        templateParams: {
+          name,
+          emergencyMessage,
+          locationText: locationSummary,
+          mapsLink: mapsUrl,
+          timeString: `${istTime} IST`,
+        },
       });
 
+      results.push({
+        name: contact.name,
+        phone: maskedPhone,
+        rawPhone: contact.phone,
+        accepted: sendResult.accepted,
+        status: sendResult.status, // 'ACCEPTED' | 'REJECTED' | 'CONFIG_ERROR' | 'TIMEOUT'
+        messageId: sendResult.messageId || null,
+        error: sendResult.error || null,
+        code: sendResult.code || null,
+      });
+
+      // Brief delay between individual requests to respect rate limits
       if (i < targetContacts.length - 1) {
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 500));
       }
     }
 
+    // Accurate status tracking:
+    // - ACCEPTED_ALL when Meta accepts requests for all guardians
+    // - PARTIALLY_ACCEPTED when only some requests are accepted
+    // - FAILED when none are accepted
+    const acceptedCount = results.filter(r => r.accepted).length;
+    let overallStatus = 'FAILED';
+    if (acceptedCount === targetContacts.length) {
+      overallStatus = 'ACCEPTED_ALL';
+    } else if (acceptedCount > 0) {
+      overallStatus = 'PARTIALLY_ACCEPTED';
+    } else {
+      overallStatus = 'FAILED';
+    }
+
+    const isOverallOk = acceptedCount > 0;
+
+    console.log(`[SOS Meta API] Overall status for "${name}": ${overallStatus} (${acceptedCount}/${targetContacts.length} accepted).`);
+
     return res.json({
-      ok: results.some(r => r.sent),
+      ok: isOverallOk,
+      overallStatus, // 'ACCEPTED_ALL' | 'PARTIALLY_ACCEPTED' | 'FAILED'
+      acceptedAll: acceptedCount === targetContacts.length,
+      acceptedCount,
+      totalContacts: targetContacts.length,
+      templateUsed: activeTemplateName,
+      templateLang: WHATSAPP_TEMPLATE_LANG,
       results,
+      location: validLocation,
+      provider: 'meta_cloud_api',
     });
   } catch (error) {
     console.error('[SOS] Error processing /api/sos:', error);
-    return res.status(500).json({ ok: false, error: 'Internal server error' });
+    return res.status(500).json({ ok: false, overallStatus: 'FAILED', error: 'Internal server error: ' + error.message });
   }
 });
 
 // Healthcheck
-app.get('/health', (req, res) => res.json({ status: 'ok', service: 'Sahaara SAATHI Backend', model: GROQ_MODEL }));
+app.get('/health', (req, res) => res.json({
+  status: 'ok',
+  service: 'Sahaara SAATHI Backend',
+  model: GROQ_MODEL,
+  apiVersion: WHATSAPP_API_VERSION,
+  whatsappConfigured: !!(WHATSAPP_ACCESS_TOKEN && WHATSAPP_PHONE_NUMBER_ID),
+  templateConfigured: !!WHATSAPP_TEMPLATE_NAME,
+  templateName: WHATSAPP_TEMPLATE_NAME,
+}));
 
 const HOST = process.env.HOST || '0.0.0.0';
 app.listen(PORT, HOST, (err) => {
@@ -603,5 +764,8 @@ app.listen(PORT, HOST, (err) => {
   console.log('====================================================');
   console.log(`🚀 Sahaara SAATHI Server running on http://${HOST}:${PORT}`);
   console.log(`🤖 Model: ${GROQ_MODEL}`);
+  console.log(`📱 WhatsApp Graph API Version: ${WHATSAPP_API_VERSION}`);
+  console.log(`📱 WhatsApp Meta Cloud API: ${WHATSAPP_ACCESS_TOKEN && WHATSAPP_PHONE_NUMBER_ID ? 'Configured ✅' : 'Not configured (set WHATSAPP_ACCESS_TOKEN & WHATSAPP_PHONE_NUMBER_ID)'}`);
+  console.log(`📋 WhatsApp Utility Template: ${WHATSAPP_TEMPLATE_NAME ? `"${WHATSAPP_TEMPLATE_NAME}" (${WHATSAPP_TEMPLATE_LANG}) ✅` : 'Not set ❌'}`);
   console.log('====================================================');
 });
