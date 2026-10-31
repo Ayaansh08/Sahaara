@@ -15,6 +15,8 @@ process.env.NODE_ENV = 'test';
 const assert = require('assert');
 const http = require('http');
 
+const twilio = require('twilio');
+
 const {
   STATUS,
   STATUS_RANK,
@@ -28,7 +30,17 @@ const {
   processStatusCallback,
   validateTwilioWebhookSignature,
   setGlobalTwilioClient,
+  setGlobalFirestoreDb,
+  trackMessageDurable,
+  syncGuardianStatusToAlert,
+  buildSosContentVariables,
+  validateContentVariables,
 } = require('../services/twilioService');
+
+const {
+  setTestMockContactsResolver,
+  setCustomFirestoreDb,
+} = require('../services/authAndContactsService');
 
 const app = require('../index');
 
@@ -80,6 +92,54 @@ function createMockTwilioClient(options = {}) {
           friendlyName: 'Mock Account',
         }),
       }),
+    },
+  };
+}
+
+// Mock Firestore Factory for durable persistence testing
+function createMockFirestore() {
+  const collections = new Map();
+
+  function getCol(name) {
+    if (!collections.has(name)) collections.set(name, new Map());
+    return collections.get(name);
+  }
+
+  return {
+    _collections: collections,
+    collection: (colName) => {
+      const col = getCol(colName);
+      return {
+        doc: (docId) => {
+          const id = docId || ('doc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6));
+          return {
+            id,
+            get: async () => {
+              const data = col.get(id);
+              return {
+                exists: data !== undefined,
+                id,
+                data: () => (data ? JSON.parse(JSON.stringify(data)) : undefined),
+              };
+            },
+            set: async (newData) => {
+              col.set(id, JSON.parse(JSON.stringify(newData)));
+              return { id };
+            },
+            update: async (fields) => {
+              const existing = col.get(id) || {};
+              const merged = { ...existing, ...JSON.parse(JSON.stringify(fields)) };
+              col.set(id, merged);
+              return { id };
+            },
+          };
+        },
+        add: async (data) => {
+          const id = 'doc_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+          col.set(id, JSON.parse(JSON.stringify(data)));
+          return { id };
+        },
+      };
     },
   };
 }
@@ -545,6 +605,12 @@ async function runAllTests() {
     assert.strictEqual(res2.status, 401, 'Request with invalid token must return 401');
   });
 
+  // Set resolver for contacts in test environment (never from req.body)
+  setTestMockContactsResolver((uid) => {
+    if (uid.includes('no-contacts')) return [];
+    return [{ name: 'Son', phone: '9876543210', relation: 'Son' }];
+  });
+
   // Setup Global Mock Client for HTTP endpoints
   const httpGlobalMockClient = createMockTwilioClient({
     customBehavior: (params) => ({
@@ -707,6 +773,404 @@ async function runAllTests() {
     assert.strictEqual(resAuth.body.sosDispatched, false);
     assert.strictEqual(resAuth.body.deliveryConfirmed, false);
   });
+
+  // Test 22: REGRESSION - Client-supplied _testMockContacts in body is strictly ignored
+  await runTest('22. REGRESSION: Client-supplied _testMockContacts in body is ignored; only authenticated Firestore contacts used', async () => {
+    // 1. Authenticated user with Firestore contacts configured
+    setTestMockContactsResolver((uid) => {
+      if (uid === 'legit-elder-user') {
+        return [{ name: 'Legit Daughter', phone: '9876543210' }];
+      }
+      return [];
+    });
+
+    // In sandbox mode: returns 400 with SANDBOX_MODE_RESTRICTION, but alert record should contain ONLY legit daughter, NOT injected attacker
+    const res = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: {
+        Authorization: 'Bearer mock-token-legit-elder-user',
+        'x-test-auth-mock': 'true',
+      },
+      body: {
+        reason: 'manual',
+        _testMockContacts: [{ name: 'Malicious Attacker', phone: '1111111111' }],
+      },
+    });
+
+    assert.strictEqual(res.status, 400); // 400 due to sandbox restriction
+    assert.strictEqual(res.body.code, 'SANDBOX_MODE_RESTRICTION');
+
+    // 2. User with NO emergency contacts in Firestore cannot inject contacts via body
+    const resNoContacts = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: {
+        Authorization: 'Bearer mock-token-user-with-no-contacts',
+        'x-test-auth-mock': 'true',
+      },
+      body: {
+        reason: 'manual',
+        _testMockContacts: [{ name: 'Injected Contact', phone: '9999999999' }],
+      },
+    });
+
+    assert.strictEqual(resNoContacts.status, 400);
+    assert.ok(resNoContacts.body.error.includes('No valid emergency contacts configured'));
+  });
+
+  // Test 23: REGRESSION - Client cannot override Content SID or ContentVariables
+  await runTest('23. REGRESSION: Client cannot override Content SID or ContentVariables', async () => {
+    // 1. buildSosContentVariables verifies and builds server variables
+    const vars = buildSosContentVariables({
+      userName: 'Senior Sharma',
+      emergencyMessage: 'Pressed SOS button',
+      locationSummary: 'Delhi (28.6139, 77.2090)',
+      mapsLink: 'https://maps.google.com/?q=28.6139,77.2090',
+      timeString: '3:00 PM IST',
+    });
+    assert.strictEqual(vars['1'], 'Senior Sharma');
+    assert.strictEqual(vars['2'], 'Pressed SOS button');
+    assert.strictEqual(vars['3'], 'Delhi (28.6139, 77.2090)');
+    assert.strictEqual(vars['4'], 'https://maps.google.com/?q=28.6139,77.2090');
+    assert.strictEqual(vars['5'], '3:00 PM IST');
+
+    // 2. Missing required variable validation
+    assert.throws(() => {
+      buildSosContentVariables({ userName: '', emergencyMessage: '' });
+    }, /Required template variables missing/);
+
+    // 3. validateContentVariables checks all variables are defined
+    assert.strictEqual(validateContentVariables(vars), true);
+    assert.strictEqual(validateContentVariables({ '1': null }), false);
+    assert.strictEqual(validateContentVariables({ '1': '   ' }), false);
+  });
+
+  // Test 24: REGRESSION - Legacy reason: 'test' is rejected from /api/sos with 400
+  await runTest('24. REGRESSION: Obsolete legacy reason: "test" is rejected from /api/sos', async () => {
+    const res = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: {
+        Authorization: 'Bearer mock-token-reason-test-user',
+        'x-test-auth-mock': 'true',
+      },
+      body: {
+        reason: 'test', // Legacy test reason
+      },
+    });
+
+    assert.strictEqual(res.status, 400, 'Legacy test reason must be rejected with 400');
+    assert.strictEqual(res.body.error, 'Invalid or missing reason');
+  });
+
+  // Test 25: REGRESSION - Webhook signature verification fails closed on missing TWILIO_AUTH_TOKEN
+  await runTest('25. REGRESSION: Webhook fails closed when TWILIO_AUTH_TOKEN is missing', async () => {
+    const savedToken = process.env.TWILIO_AUTH_TOKEN;
+    try {
+      delete process.env.TWILIO_AUTH_TOKEN;
+
+      const res = await makeRequest(app, {
+        method: 'POST',
+        path: '/api/twilio/status-callback',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'x-twilio-signature': 'any_sig',
+        },
+        body: 'MessageSid=SM_test&MessageStatus=delivered',
+      });
+
+      assert.strictEqual(res.status, 500, 'Must fail closed with 500 on missing AUTH_TOKEN');
+      assert.ok(res.body.error.includes('TWILIO_AUTH_TOKEN is missing'));
+    } finally {
+      process.env.TWILIO_AUTH_TOKEN = savedToken;
+    }
+  });
+
+  // Test 26: REGRESSION - Webhook signature verification fails on missing or invalid signature
+  await runTest('26. REGRESSION: Webhook rejects missing or invalid X-Twilio-Signature', async () => {
+    // Missing signature header
+    const resMissing = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/status-callback',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+      },
+      body: 'MessageSid=SM_test&MessageStatus=delivered',
+    });
+    assert.strictEqual(resMissing.status, 403);
+    assert.ok(resMissing.body.error.includes('Missing X-Twilio-Signature'));
+
+    // Forged signature
+    const resInvalid = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/status-callback',
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'x-twilio-signature': 'forged_signature_abc_123',
+      },
+      body: 'MessageSid=SM_test&MessageStatus=delivered',
+    });
+    assert.strictEqual(resInvalid.status, 403);
+    assert.ok(resInvalid.body.error.includes('Invalid Twilio signature'));
+  });
+
+  // Test 27: REGRESSION - Webhook valid signature succeeds
+  await runTest('27. REGRESSION: Webhook valid X-Twilio-Signature succeeds', async () => {
+    const testUrl = 'https://sahaara.app/api/twilio/status-callback';
+    const savedCallbackUrl = process.env.TWILIO_STATUS_CALLBACK_URL;
+    process.env.TWILIO_STATUS_CALLBACK_URL = testUrl;
+
+    try {
+      const bodyParams = {
+        MessageSid: 'SM_valid_signature_test',
+        MessageStatus: 'delivered',
+      };
+      const validSig = twilio.getExpectedTwilioSignature(process.env.TWILIO_AUTH_TOKEN, testUrl, bodyParams);
+
+      const res = await makeRequest(app, {
+        method: 'POST',
+        path: '/api/twilio/status-callback',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'x-twilio-signature': validSig,
+        },
+        body: 'MessageSid=SM_valid_signature_test&MessageStatus=delivered',
+      });
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.status, 'ok');
+    } finally {
+      process.env.TWILIO_STATUS_CALLBACK_URL = savedCallbackUrl;
+    }
+  });
+
+  // Test 28: REGRESSION - Webhook signature bypass header is rejected outside test environment
+  await runTest('28. REGRESSION: Signature bypass header is rejected outside test environment', async () => {
+    const savedEnv = process.env.NODE_ENV;
+    try {
+      // Simulate production environment
+      process.env.NODE_ENV = 'production';
+
+      const resProd = await makeRequest(app, {
+        method: 'POST',
+        path: '/api/twilio/status-callback',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'x-test-signature-bypass': 'true',
+        },
+        body: 'MessageSid=SM_bypass_test&MessageStatus=delivered',
+      });
+
+      assert.strictEqual(resProd.status, 403, 'Must reject bypass when NODE_ENV is production');
+      assert.ok(resProd.body.error.includes('only permitted in test environment'));
+
+      // In test environment, bypass succeeds
+      process.env.NODE_ENV = 'test';
+      const resTest = await makeRequest(app, {
+        method: 'POST',
+        path: '/api/twilio/status-callback',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          'x-test-signature-bypass': 'true',
+        },
+        body: 'MessageSid=SM_bypass_test&MessageStatus=delivered',
+      });
+
+      assert.strictEqual(resTest.status, 200, 'Must accept bypass when NODE_ENV is test');
+    } finally {
+      process.env.NODE_ENV = savedEnv;
+    }
+  });
+
+  // Test 29: REGRESSION - Durable status persistence in Firestore across server restart
+  await runTest('29. REGRESSION: Durable status persistence survives simulated backend restart', async () => {
+    const mockDb = createMockFirestore();
+    setGlobalFirestoreDb(mockDb);
+    setCustomFirestoreDb(mockDb);
+
+    const alertId = 'alert-restart-test-123';
+    const messageSid = 'SM_restart_test_456';
+
+    // 1. Pre-create SOS record in Firestore with initial QUEUED status
+    await mockDb.collection('sos_alerts').doc(alertId).set({
+      userId: 'user-123',
+      overallStatus: 'SENDING',
+      guardianResults: [
+        {
+          name: 'Son',
+          phone: '...4321',
+          rawPhone: '9876543210',
+          messageSid,
+          status: STATUS.QUEUED,
+          delivered: false,
+          read: false,
+        },
+      ],
+    });
+
+    // 2. Track message durably
+    await trackMessageDurable({
+      messageSid,
+      alertId,
+      userId: 'user-123',
+      phone: '9876543210',
+      guardianName: 'Son',
+      initialStatus: STATUS.QUEUED,
+      firestoreDb: mockDb,
+    });
+
+    // Verify written to Firestore twilio_dispatches
+    const dispatchDoc = await mockDb.collection('twilio_dispatches').doc(messageSid).get();
+    assert.strictEqual(dispatchDoc.exists, true);
+    assert.strictEqual(dispatchDoc.data().alertId, alertId);
+
+    // 3. SIMULATE COMPLETE BACKEND RESTART: Wipe in-memory tracker
+    clearTrackedMessages();
+    assert.strictEqual(getTrackedMessage(messageSid), null, 'In-memory tracker must be empty');
+
+    // 4. Status callback arrives after restart
+    const cbRes = await processStatusCallback({
+      messageSid,
+      messageStatus: 'delivered',
+      firestoreDb: mockDb,
+    });
+
+    assert.strictEqual(cbRes.success, true);
+    assert.strictEqual(cbRes.newStatus, STATUS.DELIVERED);
+
+    // 5. Verify Firestore SOS record updated accurately
+    const updatedAlert = await mockDb.collection('sos_alerts').doc(alertId).get();
+    const alertData = updatedAlert.data();
+    assert.strictEqual(alertData.guardianResults[0].status, STATUS.DELIVERED);
+    assert.strictEqual(alertData.guardianResults[0].delivered, true);
+    assert.strictEqual(alertData.deliveryStatus, 'DELIVERED_ALL');
+  });
+
+  // Test 30: REGRESSION - Early callback arrives before send workflow completes
+  await runTest('30. REGRESSION: Early callback arriving before send workflow finishes is reconciled', async () => {
+    const mockDb = createMockFirestore();
+    setGlobalFirestoreDb(mockDb);
+
+    const messageSid = 'SM_early_callback_test';
+    const alertId = 'alert-early-test-789';
+
+    // Pre-create SOS alert record
+    await mockDb.collection('sos_alerts').doc(alertId).set({
+      userId: 'user-early',
+      overallStatus: 'SENDING',
+      guardianResults: [
+        {
+          name: 'Daughter',
+          phone: '...1234',
+          rawPhone: '9876541234',
+          messageSid,
+          status: STATUS.QUEUED,
+          delivered: false,
+        },
+      ],
+    });
+
+    // 1. Early callback arrives before trackMessageDurable is called
+    const earlyRes = await processStatusCallback({
+      messageSid,
+      messageStatus: 'delivered',
+      firestoreDb: mockDb,
+    });
+    assert.strictEqual(earlyRes.success, true);
+    assert.strictEqual(earlyRes.pendingEarlyCallback, true);
+
+    // 2. Later, send workflow completes and calls trackMessageDurable
+    await trackMessageDurable({
+      messageSid,
+      alertId,
+      userId: 'user-early',
+      phone: '9876541234',
+      guardianName: 'Daughter',
+      initialStatus: STATUS.QUEUED,
+      firestoreDb: mockDb,
+    });
+
+    // 3. Verify that higher DELIVERED status from early callback was preserved and synced!
+    const dispatchDoc = await mockDb.collection('twilio_dispatches').doc(messageSid).get();
+    assert.strictEqual(dispatchDoc.data().status, STATUS.DELIVERED, 'Must not regress to QUEUED');
+    assert.strictEqual(dispatchDoc.data().alertId, alertId);
+
+    const alertDoc = await mockDb.collection('sos_alerts').doc(alertId).get();
+    assert.strictEqual(alertDoc.data().guardianResults[0].status, STATUS.DELIVERED);
+    assert.strictEqual(alertDoc.data().deliveryStatus, 'DELIVERED_ALL');
+  });
+
+  // Test 31: REGRESSION - Status callbacks never report queued, sending, or sent as delivered; aggregate status updates accurately
+  await runTest('31. REGRESSION: Status callbacks never report non-delivered as delivered; accurate aggregates', async () => {
+    const mockDb = createMockFirestore();
+    setGlobalFirestoreDb(mockDb);
+
+    const alertId = 'alert-aggregate-test';
+    const sid1 = 'SM_agg_1';
+    const sid2 = 'SM_agg_2';
+
+    await mockDb.collection('sos_alerts').doc(alertId).set({
+      overallStatus: 'SENDING',
+      guardianResults: [
+        { name: 'Son', rawPhone: '9876543210', messageSid: sid1, status: STATUS.QUEUED, delivered: false },
+        { name: 'Daughter', rawPhone: '9876543211', messageSid: sid2, status: STATUS.QUEUED, delivered: false },
+      ],
+    });
+
+    await trackMessageDurable({ messageSid: sid1, alertId, phone: '9876543210', initialStatus: STATUS.QUEUED, firestoreDb: mockDb });
+    await trackMessageDurable({ messageSid: sid2, alertId, phone: '9876543211', initialStatus: STATUS.QUEUED, firestoreDb: mockDb });
+
+    // Step 1: sid1 transitions to SENT
+    await processStatusCallback({ messageSid: sid1, messageStatus: 'sent', firestoreDb: mockDb });
+    let doc = await mockDb.collection('sos_alerts').doc(alertId).get();
+    assert.strictEqual(doc.data().guardianResults[0].delivered, false, 'SENT must NOT be marked as delivered');
+    assert.notStrictEqual(doc.data().deliveryStatus, 'DELIVERED_ALL');
+
+    // Step 2: sid1 transitions to DELIVERED -> PARTIALLY_DELIVERED
+    await processStatusCallback({ messageSid: sid1, messageStatus: 'delivered', firestoreDb: mockDb });
+    doc = await mockDb.collection('sos_alerts').doc(alertId).get();
+    assert.strictEqual(doc.data().guardianResults[0].delivered, true);
+    assert.strictEqual(doc.data().deliveryStatus, 'PARTIALLY_DELIVERED');
+
+    // Step 3: sid2 transitions to READ -> DELIVERED_ALL
+    await processStatusCallback({ messageSid: sid2, messageStatus: 'read', eventType: 'READ', firestoreDb: mockDb });
+    doc = await mockDb.collection('sos_alerts').doc(alertId).get();
+    assert.strictEqual(doc.data().guardianResults[1].delivered, true);
+    assert.strictEqual(doc.data().guardianResults[1].read, true);
+    assert.strictEqual(doc.data().deliveryStatus, 'DELIVERED_ALL');
+  });
+
+  // Test 32: REGRESSION - Out-of-order and duplicate events in Firestore are handled safely
+  await runTest('32. REGRESSION: Out-of-order and duplicate callback events in Firestore are handled safely', async () => {
+    const mockDb = createMockFirestore();
+    setGlobalFirestoreDb(mockDb);
+
+    const alertId = 'alert-order-test';
+    const sid = 'SM_order_test_sid';
+
+    await mockDb.collection('sos_alerts').doc(alertId).set({
+      overallStatus: 'SENDING',
+      guardianResults: [
+        { name: 'Son', rawPhone: '9876543210', messageSid: sid, status: STATUS.DELIVERED, delivered: true },
+      ],
+    });
+
+    await trackMessageDurable({ messageSid: sid, alertId, phone: '9876543210', initialStatus: STATUS.DELIVERED, firestoreDb: mockDb });
+
+    // Duplicate event
+    const dupRes = await processStatusCallback({ messageSid: sid, messageStatus: 'delivered', firestoreDb: mockDb });
+    assert.strictEqual(dupRes.duplicate, true, 'Should detect duplicate callback');
+
+    // Out-of-order older event (SENT arrives after DELIVERED)
+    const oldRes = await processStatusCallback({ messageSid: sid, messageStatus: 'sent', firestoreDb: mockDb });
+    assert.strictEqual(oldRes.ignored, true, 'Should ignore older status callback');
+
+    // Verify status in Firestore did not regress
+    const doc = await mockDb.collection('sos_alerts').doc(alertId).get();
+    assert.strictEqual(doc.data().guardianResults[0].status, STATUS.DELIVERED, 'Must not regress from DELIVERED');
+  });
+
 
   console.log('\n================================================================');
   console.log(`Results: ${passedCount} passed, ${failedCount} failed.`);

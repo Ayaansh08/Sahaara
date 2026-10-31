@@ -44,11 +44,16 @@ const {
   processStatusCallback,
   isAppointmentReminderContentSid,
   verifyTwilioConnectivity,
+  buildSosContentVariables,
+  validateContentVariables,
 } = require('./services/twilioService');
 
 const {
+  getFirestoreDb,
   verifyFirebaseUser,
   getUserEmergencyContacts,
+  createInitialSosAlertRecord,
+  updateSosAlertRecord,
   recordSosAlert,
 } = require('./services/authAndContactsService');
 
@@ -423,9 +428,29 @@ app.post('/api/twilio/status-callback', async (req, res) => {
   try {
     const config = getTwilioConfig();
 
-    // Verify Twilio signature if AUTH_TOKEN is present
-    const isTestBypass = process.env.NODE_ENV === 'test' && req.headers['x-test-signature-bypass'] === 'true';
-    if (!isTestBypass && config.authToken) {
+    // Check test bypass: strictly allowed ONLY when NODE_ENV === 'test' AND header is present
+    const isTestBypassHeader = req.headers['x-test-signature-bypass'] === 'true';
+    if (isTestBypassHeader) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[Twilio Webhook] Signature bypass attempt rejected outside test environment from:', req.ip);
+        return res.status(403).json({ error: 'Forbidden: Signature bypass is only permitted in test environment' });
+      }
+      // Allowed strictly in test environment
+    } else {
+      // 1. Fail Closed: if TWILIO_AUTH_TOKEN is not configured on the server, reject callback
+      if (!config.authToken) {
+        console.error('[Twilio Webhook] TWILIO_AUTH_TOKEN is not configured on the server. Rejecting callback (fail closed).');
+        return res.status(500).json({ error: 'Server misconfiguration: TWILIO_AUTH_TOKEN is missing. Cannot verify webhook signature.' });
+      }
+
+      // 2. Reject if X-Twilio-Signature header is missing
+      const signature = req.headers['x-twilio-signature'];
+      if (!signature) {
+        console.warn('[Twilio Webhook] Missing X-Twilio-Signature header from:', req.ip);
+        return res.status(403).json({ error: 'Forbidden: Missing X-Twilio-Signature header' });
+      }
+
+      // 3. Validate signature
       const isValid = validateTwilioWebhookSignature(req, config.statusCallbackUrl, config.authToken);
       if (!isValid) {
         console.warn('[Twilio Webhook] Invalid X-Twilio-Signature from:', req.ip);
@@ -448,6 +473,7 @@ app.post('/api/twilio/status-callback', async (req, res) => {
       return res.status(400).json({ error: 'MessageSid is required' });
     }
 
+    const firestoreDb = getFirestoreDb();
     const result = await processStatusCallback({
       messageSid,
       messageStatus: MessageStatus,
@@ -455,6 +481,7 @@ app.post('/api/twilio/status-callback', async (req, res) => {
       errorCode: ErrorCode,
       errorMessage: ErrorMessage,
       to: To,
+      firestoreDb,
     });
 
     console.log(`[Twilio Webhook] Callback processed for ${messageSid}: status=${MessageStatus}, event=${EventType || 'none'} -> ${result.newStatus || result.status}`);
@@ -509,7 +536,8 @@ app.post('/api/sos', async (req, res) => {
   try {
     const { reason = 'manual', location } = req.body;
 
-    const allowedReasons = ['manual', 'test', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse'];
+    // 'test' is strictly removed; connectivity tests must use POST /api/twilio/test-connectivity
+    const allowedReasons = ['manual', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse'];
     if (!reason || !allowedReasons.includes(reason)) {
       return res.status(400).json({ ok: false, error: 'Invalid or missing reason' });
     }
@@ -582,30 +610,24 @@ app.post('/api/sos', async (req, res) => {
       };
     }
 
-    // Dedicated connectivity test when reason is 'test' (does not create SOS or dispatch alerts)
-    if (reason === 'test') {
-      const connResult = await verifyTwilioConnectivity();
-      return res.json({
-        ok: connResult.ok,
-        overallStatus: connResult.ok ? 'ACCEPTED_ALL' : 'FAILED',
-        isConnectivityTest: true,
-        twilioApiConnected: connResult.twilioApiConnected,
-        sosDispatched: false,
-        deliveryConfirmed: false,
-        mode: twilioConfig.mode,
-        message: connResult.message,
+    // 5. Retrieve user's emergency contacts from Firestore (never accept arbitrary numbers or test overrides from body)
+    const contacts = await getUserEmergencyContacts(user.uid, user.token);
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      console.log(`[SOS] Alert (${reason}) for ${user.name} (${user.uid}): No emergency contacts found in Firestore.`);
+      return res.status(400).json({
+        ok: false,
+        overallStatus: 'FAILED',
+        error: 'No valid emergency contacts configured. Please add emergency contacts in the Sahaara app.',
         results: [],
-        provider: 'twilio_whatsapp',
       });
     }
 
-    // 5. In Sandbox mode: block actual SOS alerts upfront
+    // 6. In Sandbox mode: block actual SOS alerts upfront
     // Arbitrary Content SIDs cannot bypass this restriction
     if (twilioConfig.isSandbox) {
       console.warn('[SOS] Refusing live SOS dispatch in Sandbox mode for ' + user.name + ' (' + user.uid + ').');
       
-      const contacts = await getUserEmergencyContacts(user.uid, user.token, req.body._testMockContacts);
-      
+      const firestoreDb = getFirestoreDb();
       const alertId = await recordSosAlert({
         userId: user.uid,
         userEmail: user.email,
@@ -618,6 +640,7 @@ app.post('/api/sos', async (req, res) => {
         reason,
         provider: 'twilio_whatsapp',
         token: user.token,
+        firestoreDb,
       });
 
       return res.status(400).json({
@@ -634,45 +657,32 @@ app.post('/api/sos', async (req, res) => {
       });
     }
 
-    // 4. Validate Content SID & enforce Sandbox template restrictions
-    const activeContentSid = (req.body.contentSid || twilioConfig.contentSid || '').trim();
-    if (!activeContentSid) {
+    // 7. Strict Server Control: Content SID is determined exclusively by server configuration.
+    // Client-supplied contentSid or contentVariables in req.body are strictly ignored.
+    const serverContentSid = (twilioConfig.contentSid || '').trim();
+    if (!serverContentSid) {
       console.warn('[SOS] TWILIO_WHATSAPP_CONTENT_SID is missing in server environment');
-      return res.status(400).json({
+      return res.status(503).json({
         ok: false,
         configured: false,
         overallStatus: 'FAILED',
-        error: 'TWILIO_WHATSAPP_CONTENT_SID is missing in server/.env. Twilio WhatsApp requires a Content SID.',
+        error: 'TWILIO_WHATSAPP_CONTENT_SID is missing in server configuration. Twilio WhatsApp requires an approved Content SID.',
         results: [],
       });
     }
 
-    // ?? RESTRICTION: Block Appointment Reminder Content SID from SAHAARA SOS
-    if (isAppointmentReminderContentSid(activeContentSid)) {
-      console.warn(`[SOS] Refusing to send Appointment Reminder template (${activeContentSid}) for SOS alert.`);
+    // RESTRICTION: Block Appointment Reminder Content SID from SAHAARA SOS
+    if (isAppointmentReminderContentSid(serverContentSid)) {
+      console.warn(`[SOS] Refusing to send Appointment Reminder template (${serverContentSid}) for SOS alert.`);
       return res.status(400).json({
         ok: false,
         configured: false,
         overallStatus: 'FAILED',
         code: 'APPOINTMENT_REMINDER_BLOCKED',
-        error: `Configured Content SID (${activeContentSid}) is an Appointment Reminder template ("Reminder: Appt Tue Oct 29..."). It cannot represent a SAHAARA SOS emergency notification. Twilio Sandbox does not support custom emergency templates; an approved production SOS Content SID is required.`,
+        error: `Configured Content SID (${serverContentSid}) is an Appointment Reminder template ("Reminder: Appt Tue Oct 29..."). It cannot represent a SAHAARA SOS emergency notification. Twilio Sandbox does not support custom emergency templates; an approved production SOS Content SID is required.`,
         results: [],
       });
     }
-
-    // 5. Retrieve user's emergency contacts from Firestore (never accept arbitrary numbers from body)
-    const contacts = await getUserEmergencyContacts(user.uid, user.token, req.body._testMockContacts);
-    if (!Array.isArray(contacts) || contacts.length === 0) {
-      console.log(`[SOS] Alert (${reason}) for ${user.name} (${user.uid}): No emergency contacts found in Firestore.`);
-      return res.status(400).json({
-        ok: false,
-        overallStatus: 'FAILED',
-        error: 'No valid emergency contacts configured. Please add emergency contacts in the Sahaara app.',
-        results: [],
-      });
-    }
-
-
 
     // Current time in IST
     const istTime = new Date().toLocaleString('en-IN', {
@@ -703,9 +713,6 @@ app.post('/api/sos', async (req, res) => {
       case 'manual':
         emergencyMessage = 'Pressed the SOS button and needs immediate emergency assistance!';
         break;
-      case 'test':
-        emergencyMessage = 'System test message � verifying emergency alert connectivity.';
-        break;
       case 'fall':
         emergencyMessage = 'Possible fall detected! Please call or check on them immediately.';
         break;
@@ -720,9 +727,33 @@ app.post('/api/sos', async (req, res) => {
         break;
     }
 
+    // Construct server-controlled ContentVariables
+    const contentVariables = buildSosContentVariables({
+      userName: user.name,
+      emergencyMessage,
+      locationSummary,
+      mapsLink: mapsUrl,
+      timeString: `${istTime} IST`,
+    });
+
     console.log(`[SOS Twilio] Processing SOS alert (${reason}) for ${user.name} (${user.uid}) to ${contacts.length} guardian(s) [Mode: ${twilioConfig.mode}].`);
 
-    // 7. Send alerts sequentially to guardians
+    const firestoreDb = getFirestoreDb();
+
+    // 8. Pre-create SOS record in Firestore before sending to get durable alertId
+    const alertId = await createInitialSosAlertRecord({
+      userId: user.uid,
+      userEmail: user.email,
+      userName: user.name,
+      location: validLocation,
+      reason,
+      contacts,
+      provider: 'twilio_whatsapp',
+      token: user.token,
+      firestoreDb,
+    });
+
+    // 9. Send alerts sequentially to guardians
     const sendResult = await sendSosAlertsToGuardians({
       guardians: contacts,
       userName: user.name,
@@ -730,24 +761,21 @@ app.post('/api/sos', async (req, res) => {
       locationSummary,
       mapsLink: mapsUrl,
       timeString: `${istTime} IST`,
-      contentSid: activeContentSid,
-      contentVariables: req.body.contentVariables || null,
+      contentSid: serverContentSid,
+      contentVariables,
       userId: user.uid,
+      alertId,
+      firestoreDb,
     });
 
-    // 8. Record alert in Firestore
-    const alertId = await recordSosAlert({
-      userId: user.uid,
-      userEmail: user.email,
-      userName: user.name,
-      location: validLocation,
+    // 10. Update alert in Firestore with dispatch results
+    await updateSosAlertRecord({
+      alertId,
       status: sendResult.overallStatus,
       overallStatus: sendResult.overallStatus,
       results: sendResult.results,
-      contacts,
-      reason,
-      provider: 'twilio_whatsapp',
       token: user.token,
+      firestoreDb,
     });
 
     return res.json({
@@ -765,8 +793,13 @@ app.post('/api/sos', async (req, res) => {
       statusCallbackUrl: sendResult.statusCallbackUrl,
     });
   } catch (error) {
-    console.error('[SOS] Error processing /api/sos:', error);
-    return res.status(500).json({ ok: false, overallStatus: 'FAILED', error: 'Internal server error: ' + error.message });
+    console.error('[SOS Twilio] Fatal error:', error);
+    return res.status(500).json({
+      ok: false,
+      overallStatus: 'FAILED',
+      error: 'Failed to process emergency alert: ' + error.message,
+      results: [],
+    });
   }
 });
 

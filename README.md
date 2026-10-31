@@ -1,4 +1,4 @@
-﻿# Sahaara
+# Sahaara
 
 Sahaara is a senior-friendly mobile and web app for connection, wellbeing, and preserving memories. It is built with Expo Router and React Native, with Firebase for authentication, Firestore, and photo storage. The Saathi companion uses a small Express backend to call the Groq API without exposing the API key in the client.
 
@@ -256,6 +256,20 @@ This verifies:
 16. Location retrieval failure resilience (alert proceeds even without GPS).
 17. Duplicate SOS rate limiting and debounce protection.
 18. Blocking of the default Appointment Reminder Content SID.
+19. Arbitrary Content SID cannot bypass Sandbox restriction.
+20. Dedicated connectivity testing verifies Twilio credentials without dispatching alerts.
+21. Dedicated connectivity test endpoint requires Firebase ID token authentication.
+22. Rejection of client-controlled emergency recipients (`_testMockContacts` in HTTP body is strictly ignored; only authenticated Firestore contacts used).
+23. Server-controlled Content SID & ContentVariables (client body cannot override).
+24. Legacy `reason: 'test'` rejected from `/api/sos` with 400.
+25. Webhook fails closed when `TWILIO_AUTH_TOKEN` is missing (500).
+26. Webhook rejects missing or invalid `X-Twilio-Signature` (403).
+27. Webhook valid `X-Twilio-Signature` succeeds (200).
+28. Webhook signature bypass header is rejected outside test environment (403).
+29. Durable status persistence in Firestore across simulated backend restarts.
+30. Early callback arriving before initial send completes is reconciled.
+31. Non-delivered statuses never reported as delivered; accurate aggregate status tracking.
+32. Out-of-order and duplicate callback events in Firestore handled safely.
 
 #### Testing Workflow & Sandbox vs Production Distinction
 

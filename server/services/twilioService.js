@@ -1,4 +1,4 @@
-﻿/**
+/**
  * server/services/twilioService.js
  * 
  * Reusable Twilio WhatsApp Messaging Service for SAHAARA SOS.
@@ -160,24 +160,252 @@ function mapTwilioStatus(twilioStatus, eventType = null) {
   }
 }
 
+let globalFirestoreDb = null;
+
+function setGlobalFirestoreDb(db) {
+  globalFirestoreDb = db;
+}
+
+function getFirestore() {
+  if (globalFirestoreDb) return globalFirestoreDb;
+  try {
+    const { getFirestoreDb } = require('./authAndContactsService');
+    return getFirestoreDb();
+  } catch (_) {
+    return null;
+  }
+}
+
 /**
- * In-memory registry for tracking outbound Twilio Message SIDs and their delivery status.
- * Maps messageSid -> { alertId, userId, phone, status, history, errorCode, errorMessage, lastUpdated }
+ * Builds server-controlled ContentVariables from verified user information,
+ * situation reason, validated location, map URL, and server-generated timestamp.
+ */
+function buildSosContentVariables({
+  userName,
+  emergencyMessage,
+  locationSummary,
+  mapsLink,
+  timeString,
+}) {
+  if (userName !== undefined && String(userName).trim() === '') {
+    throw new Error('Required template variables missing (userName cannot be blank)');
+  }
+  if (emergencyMessage !== undefined && String(emergencyMessage).trim() === '') {
+    throw new Error('Required template variables missing (emergencyMessage cannot be blank)');
+  }
+
+  const cleanName = String(userName || 'Sahaara Member').trim();
+  const cleanMsg = String(emergencyMessage || 'Needs immediate emergency assistance!').trim();
+  const cleanLoc = String(locationSummary || 'Location unavailable').trim();
+  const cleanMap = String(mapsLink || 'No coordinates available').trim();
+  const cleanTime = String(timeString || new Date().toISOString()).trim();
+
+  if (!cleanName || !cleanMsg) {
+    throw new Error('Required template variables missing');
+  }
+
+  return {
+    '1': cleanName,
+    '2': cleanMsg,
+    '3': cleanLoc,
+    '4': cleanMap,
+    '5': cleanTime,
+    name: cleanName,
+    message: cleanMsg,
+    location: cleanLoc,
+    mapUrl: cleanMap,
+    time: cleanTime,
+  };
+}
+
+/**
+ * Validates template ContentVariables to ensure all values are defined non-empty strings.
+ */
+function validateContentVariables(contentVariables) {
+  if (!contentVariables || typeof contentVariables !== 'object') return false;
+  for (const [key, val] of Object.entries(contentVariables)) {
+    if (val === undefined || val === null || String(val).trim() === '') return false;
+  }
+  return true;
+}
+
+/**
+ * In-memory registry for fast cache lookups of outbound Twilio Message SIDs.
+ * Maps messageSid -> { alertId, userId, phone, guardianName, status, history, errorCode, errorMessage, lastUpdated }
  */
 const messageTracker = new Map();
 
-function trackMessage({ messageSid, alertId = null, userId = null, phone = null, initialStatus = STATUS.QUEUED }) {
+function trackMessage({ messageSid, alertId = null, userId = null, phone = null, guardianName = null, initialStatus = STATUS.QUEUED }) {
   if (!messageSid) return;
   messageTracker.set(messageSid, {
+    messageSid,
     alertId,
     userId,
     phone,
+    guardianName,
     status: initialStatus,
     errorCode: null,
     errorMessage: null,
     history: [{ status: initialStatus, timestamp: new Date().toISOString() }],
     lastUpdated: Date.now(),
   });
+}
+
+/**
+ * Durable Message Tracking: Persists Twilio Message SID, SOS Alert ID, User ID,
+ * and guardian phone mapping in Firestore collection 'twilio_dispatches'.
+ * Survives server restarts and multi-instance deployments.
+ */
+async function trackMessageDurable({
+  messageSid,
+  alertId = null,
+  userId = null,
+  phone = null,
+  guardianName = null,
+  initialStatus = STATUS.QUEUED,
+  firestoreDb = null,
+}) {
+  if (!messageSid) return;
+  const db = firestoreDb || getFirestore();
+
+  const existingMemory = messageTracker.get(messageSid);
+  const currentStatus = existingMemory?.status && STATUS_RANK[existingMemory.status] > STATUS_RANK[initialStatus]
+    ? existingMemory.status
+    : initialStatus;
+
+  const record = {
+    messageSid,
+    alertId: alertId || existingMemory?.alertId || null,
+    userId: userId || existingMemory?.userId || null,
+    phone: phone || existingMemory?.phone || null,
+    guardianName: guardianName || existingMemory?.guardianName || null,
+    status: currentStatus,
+    history: existingMemory?.history || [{ status: initialStatus, timestamp: new Date().toISOString() }],
+    errorCode: existingMemory?.errorCode || null,
+    errorMessage: existingMemory?.errorMessage || null,
+    lastUpdated: Date.now(),
+  };
+  messageTracker.set(messageSid, record);
+
+  if (db) {
+    try {
+      const docRef = db.collection('twilio_dispatches').doc(messageSid);
+      const docSnap = await docRef.get();
+      if (docSnap && docSnap.exists) {
+        // Document already exists (e.g. early callback arrived before send workflow finished)
+        const data = docSnap.data();
+        const finalStatus = (STATUS_RANK[data.status] > STATUS_RANK[initialStatus]) ? data.status : initialStatus;
+        await docRef.update({
+          alertId: alertId || data.alertId || null,
+          userId: userId || data.userId || null,
+          phone: phone || data.phone || null,
+          guardianName: guardianName || data.guardianName || null,
+          status: finalStatus,
+          pendingEarlyCallback: false,
+          lastUpdated: new Date().toISOString(),
+        });
+
+        // If early callback already marked status higher (e.g. DELIVERED), sync to sos_alerts!
+        if (alertId && data.status && STATUS_RANK[data.status] > STATUS_RANK[initialStatus]) {
+          await syncGuardianStatusToAlert({
+            alertId,
+            messageSid,
+            phone,
+            newStatus: data.status,
+            errorCode: data.errorCode || null,
+            errorMessage: data.errorMessage || null,
+            firestoreDb: db,
+          });
+        }
+      } else if (docRef && typeof docRef.set === 'function') {
+        await docRef.set({
+          messageSid,
+          alertId: alertId || null,
+          userId: userId || null,
+          phone: phone || null,
+          guardianName: guardianName || null,
+          status: initialStatus,
+          history: [{ status: initialStatus, timestamp: new Date().toISOString() }],
+          errorCode: null,
+          errorMessage: null,
+          pendingEarlyCallback: false,
+          createdAt: new Date().toISOString(),
+          lastUpdated: new Date().toISOString(),
+        });
+      }
+    } catch (dbErr) {
+      console.warn('[Twilio Dispatch] Firestore durable tracking notice:', dbErr.message);
+    }
+  }
+}
+
+/**
+ * Synchronizes guardian delivery status and updates aggregate delivery status in Firestore sos_alerts.
+ */
+async function syncGuardianStatusToAlert({
+  alertId,
+  messageSid,
+  phone = null,
+  newStatus,
+  errorCode = null,
+  errorMessage = null,
+  firestoreDb = null,
+}) {
+  const db = firestoreDb || getFirestore();
+  if (!alertId || !db) return;
+  try {
+    const alertRef = db.collection('sos_alerts').doc(alertId);
+    const alertDoc = await alertRef.get();
+    if (!alertDoc || !alertDoc.exists) return;
+
+    const data = alertDoc.data();
+    const cleanPhone = phone ? normalizePhoneNumber(phone) : null;
+
+    const guardianResults = (data.guardianResults || []).map((gr) => {
+      const matchSid = gr.messageSid && gr.messageSid === messageSid;
+      const matchPhone = cleanPhone && gr.rawPhone && normalizePhoneNumber(gr.rawPhone) === cleanPhone;
+
+      if (matchSid || matchPhone) {
+        return {
+          ...gr,
+          messageSid: gr.messageSid || messageSid,
+          status: newStatus,
+          delivered: newStatus === STATUS.DELIVERED || newStatus === STATUS.READ,
+          read: newStatus === STATUS.READ,
+          errorCode: errorCode || gr.errorCode || null,
+          errorMessage: errorMessage || gr.errorMessage || null,
+        };
+      }
+      return gr;
+    });
+
+    const allDelivered =
+      guardianResults.length > 0 &&
+      guardianResults.every((g) => g.status === STATUS.DELIVERED || g.status === STATUS.READ);
+    const anyDelivered = guardianResults.some(
+      (g) => g.status === STATUS.DELIVERED || g.status === STATUS.READ
+    );
+    const allFailed =
+      guardianResults.length > 0 &&
+      guardianResults.every((g) => g.status === STATUS.FAILED || g.status === STATUS.UNDELIVERED);
+
+    let overallDeliveryStatus = data.deliveryStatus || data.overallStatus;
+    if (allDelivered) {
+      overallDeliveryStatus = 'DELIVERED_ALL';
+    } else if (anyDelivered) {
+      overallDeliveryStatus = 'PARTIALLY_DELIVERED';
+    } else if (allFailed) {
+      overallDeliveryStatus = 'FAILED_ALL';
+    }
+
+    await alertRef.update({
+      guardianResults,
+      deliveryStatus: overallDeliveryStatus,
+      lastCallbackAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.warn('[Twilio Callback] Sync to sos_alerts notice:', err.message);
+  }
 }
 
 function getTrackedMessage(messageSid) {
@@ -244,7 +472,18 @@ async function sendTwilioWhatsAppMessage({
     };
   }
 
-  // 4. 🚨 SANDBOX RESTRICTION: In Sandbox mode, actual SOS alerts cannot be dispatched
+  // 4. Validate contentVariables if provided
+  if (contentVariables && !validateContentVariables(contentVariables)) {
+    return {
+      accepted: false,
+      status: STATUS.FAILED,
+      error: 'Invalid contentVariables: all template variables must be defined non-empty values.',
+      code: 'INVALID_CONTENT_VARIABLES',
+      messageSid: null,
+    };
+  }
+
+  // 5. 🚨 SANDBOX RESTRICTION: In Sandbox mode, actual SOS alerts cannot be dispatched
   // Arbitrary Content SIDs are NOT permitted to bypass this restriction
   if (config.isSandbox) {
     return {
@@ -360,6 +599,7 @@ async function sendSosAlertsToGuardians({
   configOverrides = {},
   client = null,
   sleepFn = null,
+  firestoreDb = null,
 }) {
   const config = getTwilioConfig(configOverrides);
 
@@ -409,14 +649,16 @@ async function sendSosAlertsToGuardians({
       client,
     });
 
-    // Track accepted messages for status callback reconciliation
+    // Track accepted messages for status callback reconciliation (durable & memory)
     if (sendRes.accepted && sendRes.messageSid) {
-      trackMessage({
+      await trackMessageDurable({
         messageSid: sendRes.messageSid,
         alertId,
         userId,
         phone: guardian.phone,
+        guardianName: guardian.name,
         initialStatus: sendRes.status,
+        firestoreDb,
       });
     }
 
@@ -471,6 +713,7 @@ async function sendSosAlertsToGuardians({
 
 /**
  * Validates Twilio webhook signature using official Twilio SDK and Auth Token.
+ * Correctly accounts for reverse proxies (X-Forwarded-Proto, X-Forwarded-Host).
  */
 function validateTwilioWebhookSignature(req, webhookUrl = null, authToken = null) {
   const token = authToken || process.env.TWILIO_AUTH_TOKEN;
@@ -479,19 +722,31 @@ function validateTwilioWebhookSignature(req, webhookUrl = null, authToken = null
   const twilioSignature = req.headers['x-twilio-signature'] || '';
   if (!twilioSignature) return false;
 
-  const url = webhookUrl || (req.protocol + '://' + req.get('host') + req.originalUrl);
-  return twilio.validateRequest(token, twilioSignature, url, req.body);
+  let url = webhookUrl;
+  if (!url || !url.startsWith('http')) {
+    const proto = req.headers['x-forwarded-proto'] || req.protocol || 'http';
+    const host = req.headers['x-forwarded-host'] || req.get('host');
+    url = `${proto}://${host}${req.originalUrl}`;
+  }
+
+  try {
+    return twilio.validateRequest(token, twilioSignature, url, req.body);
+  } catch (err) {
+    return false;
+  }
 }
 
 /**
  * Processes an incoming Twilio status callback event.
  * 
  * Rules:
- * - Safely handles retries and duplicate events.
- * - Handles WhatsApp READ events (via EventType === 'READ' or MessageStatus === 'read').
- * - Monotonic status progression: never overwrites later statuses (DELIVERED, READ)
- *   with older callbacks (SENT, QUEUED).
- * - Updates in-memory tracker and Firestore record if available.
+ * - Durable persistence: reads from and writes to Firestore 'twilio_dispatches' collection.
+ * - Survives backend restarts and multi-instance environments.
+ * - Handles race condition where callback arrives before send workflow completes.
+ * - Idempotent: acknowledges duplicate callbacks safely without duplicating updates.
+ * - Monotonic progression: never overwrites later statuses (DELIVERED, READ) with older callbacks (SENT, QUEUED).
+ * - Accurately updates guardian status and aggregate SOS delivery status in Firestore sos_alerts.
+ * - Never marks queued, sending, or sent as delivered.
  */
 async function processStatusCallback({
   messageSid,
@@ -506,109 +761,156 @@ async function processStatusCallback({
     return { success: false, reason: 'MISSING_MESSAGE_SID' };
   }
 
+  const db = firestoreDb || getFirestore();
+
   const incomingStatus = (eventType === 'READ' || messageStatus === 'read')
     ? STATUS.READ
     : mapTwilioStatus(messageStatus, eventType);
 
-  const existing = messageTracker.get(messageSid) || {
-    status: STATUS.UNKNOWN,
-    history: [],
-  };
+  // 1. Retrieve dispatch record: check Firestore first (authoritative), fallback to memory
+  let dispatchRecord = null;
+  let dispatchDocRef = null;
 
-  const currentRank = STATUS_RANK[existing.status] || 0;
+  if (db) {
+    try {
+      dispatchDocRef = db.collection('twilio_dispatches').doc(messageSid);
+      const snap = await dispatchDocRef.get();
+      if (snap && snap.exists) {
+        dispatchRecord = snap.data();
+      }
+    } catch (err) {
+      console.warn('[Twilio Callback] Firestore read warning:', err.message);
+    }
+  }
+
+  if (!dispatchRecord) {
+    dispatchRecord = messageTracker.get(messageSid) || null;
+  }
+
+  // Handle EARLY CALLBACK arriving before send workflow created the dispatch doc
+  if (!dispatchRecord) {
+    const earlyRecord = {
+      messageSid,
+      alertId: null,
+      userId: null,
+      phone: to ? normalizePhoneNumber(to) : null,
+      status: incomingStatus,
+      pendingEarlyCallback: true,
+      history: [
+        {
+          status: incomingStatus,
+          rawStatus: messageStatus,
+          eventType: eventType || null,
+          errorCode: errorCode || null,
+          timestamp: new Date().toISOString(),
+        },
+      ],
+      errorCode: errorCode || null,
+      errorMessage: errorMessage || null,
+      lastUpdated: new Date().toISOString(),
+    };
+
+    messageTracker.set(messageSid, earlyRecord);
+
+    if (db && dispatchDocRef) {
+      try {
+        await dispatchDocRef.set(earlyRecord);
+      } catch (err) {
+        console.warn('[Twilio Callback] Early record write warning:', err.message);
+      }
+    }
+
+    return {
+      success: true,
+      messageSid,
+      newStatus: incomingStatus,
+      pendingEarlyCallback: true,
+    };
+  }
+
+  const currentStatus = dispatchRecord.status || STATUS.UNKNOWN;
+  const currentRank = STATUS_RANK[currentStatus] || 0;
   const incomingRank = STATUS_RANK[incomingStatus] || 0;
 
-  // 1. Idempotency check: duplicate event with identical status
-  if (existing.status === incomingStatus && existing.status !== STATUS.UNKNOWN) {
+  // 2. Duplicate event check (idempotency)
+  if (currentStatus === incomingStatus && currentStatus !== STATUS.UNKNOWN) {
     return {
       success: true,
       duplicate: true,
       messageSid,
-      status: existing.status,
+      status: currentStatus,
       message: 'Duplicate status callback acknowledged safely',
     };
   }
 
-  // 2. Monotonic progression rule: do not overwrite a later status with an older callback
+  // 3. Monotonic progression rule: do not overwrite a later status with an older callback
   const isTerminalFailure = incomingStatus === STATUS.FAILED || incomingStatus === STATUS.UNDELIVERED;
   if (!isTerminalFailure && incomingRank < currentRank) {
     return {
       success: true,
       ignored: true,
       messageSid,
-      currentStatus: existing.status,
+      currentStatus,
       incomingStatus,
-      message: `Ignored older status callback (${incomingStatus}) because current status is already ${existing.status}`,
+      message: `Ignored older status callback (${incomingStatus}) because current status is already ${currentStatus}`,
     };
   }
 
-  // 3. Update in-memory tracker
+  // 4. Update memory cache
+  const updatedHistory = [
+    ...(dispatchRecord.history || []),
+    {
+      status: incomingStatus,
+      rawStatus: messageStatus,
+      eventType: eventType || null,
+      errorCode: errorCode || null,
+      timestamp: new Date().toISOString(),
+    },
+  ];
+
   const updatedRecord = {
-    ...existing,
+    ...dispatchRecord,
     status: incomingStatus,
-    errorCode: errorCode || existing.errorCode || null,
-    errorMessage: errorMessage || existing.errorMessage || null,
-    history: [
-      ...existing.history,
-      {
-        status: incomingStatus,
-        rawStatus: messageStatus,
-        eventType: eventType || null,
-        errorCode: errorCode || null,
-        timestamp: new Date().toISOString(),
-      },
-    ],
+    history: updatedHistory,
+    errorCode: errorCode || dispatchRecord.errorCode || null,
+    errorMessage: errorMessage || dispatchRecord.errorMessage || null,
     lastUpdated: Date.now(),
   };
   messageTracker.set(messageSid, updatedRecord);
 
-  // 4. Update Firestore if alertId is known and firestoreDb is supplied
-  if (existing.alertId && firestoreDb) {
+  // 5. Update Firestore dispatch doc
+  if (db && dispatchDocRef) {
     try {
-      const alertRef = firestoreDb.collection('sos_alerts').doc(existing.alertId);
-      const alertDoc = await alertRef.get();
-      if (alertDoc.exists) {
-        const data = alertDoc.data();
-        const guardianResults = (data.guardianResults || []).map((gr) => {
-          if (gr.messageSid === messageSid || gr.rawPhone === existing.phone) {
-            return {
-              ...gr,
-              status: incomingStatus,
-              delivered: incomingStatus === STATUS.DELIVERED || incomingStatus === STATUS.READ,
-              read: incomingStatus === STATUS.READ,
-              errorCode: errorCode || gr.errorCode || null,
-              errorMessage: errorMessage || gr.errorMessage || null,
-            };
-          }
-          return gr;
-        });
-
-        const anyDelivered = guardianResults.some(
-          (g) => g.status === STATUS.DELIVERED || g.status === STATUS.READ
-        );
-        const allDelivered =
-          guardianResults.length > 0 &&
-          guardianResults.every((g) => g.status === STATUS.DELIVERED || g.status === STATUS.READ);
-
-        let overallDeliveryStatus = data.overallStatus;
-        if (allDelivered) overallDeliveryStatus = 'DELIVERED_ALL';
-        else if (anyDelivered) overallDeliveryStatus = 'PARTIALLY_DELIVERED';
-
-        await alertRef.update({
-          guardianResults,
-          deliveryStatus: overallDeliveryStatus,
-          lastCallbackAt: new Date(),
-        });
-      }
-    } catch (dbErr) {
-      console.warn('[Twilio Callback] Firestore update warning:', dbErr.message);
+      await dispatchDocRef.update({
+        status: incomingStatus,
+        history: updatedHistory,
+        errorCode: errorCode || dispatchRecord.errorCode || null,
+        errorMessage: errorMessage || dispatchRecord.errorMessage || null,
+        lastUpdated: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn('[Twilio Callback] Firestore dispatch doc update notice:', err.message);
     }
+  }
+
+  // 6. Update SOS alert doc in Firestore if alertId is known
+  const alertId = dispatchRecord.alertId;
+  if (alertId && db) {
+    await syncGuardianStatusToAlert({
+      alertId,
+      messageSid,
+      phone: dispatchRecord.phone,
+      newStatus: incomingStatus,
+      errorCode,
+      errorMessage,
+      firestoreDb: db,
+    });
   }
 
   return {
     success: true,
     messageSid,
-    previousStatus: existing.status,
+    previousStatus: currentStatus,
     newStatus: incomingStatus,
     errorCode: errorCode || null,
   };
@@ -705,4 +1007,9 @@ module.exports = {
   clearTrackedMessages,
   validateTwilioWebhookSignature,
   processStatusCallback,
+  setGlobalFirestoreDb,
+  trackMessageDurable,
+  syncGuardianStatusToAlert,
+  buildSosContentVariables,
+  validateContentVariables,
 };
