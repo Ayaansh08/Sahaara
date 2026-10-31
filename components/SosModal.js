@@ -1,4 +1,4 @@
-﻿/**
+/**
  * components/SosModal.js
  * Calm senior-first two-step emergency confirm modal.
  * Integrates WhatsApp emergency alert via Meta WhatsApp Cloud API backend & foreground GPS location.
@@ -50,6 +50,18 @@ export default function SosModal({ visible, onClose }) {
   const isSandboxBlocked = Boolean(
     sosResult?.code === 'SANDBOX_MODE_RESTRICTION' ||
     (sosResult?.error && String(sosResult.error).includes('Sandbox mode'))
+  );
+  const isAuthError = Boolean(
+    sosResult?.authError === true ||
+    sosResult?.status === 401 ||
+    sosResult?.errorCode === 'UNAUTHORIZED' ||
+    sosResult?.errorCode === 'AUTHENTICATION_REQUIRED' ||
+    sosResult?.errorCode === 'AUTH_HEADER_MISSING' ||
+    sosResult?.errorCode === 'AUTH_HEADER_MALFORMED' ||
+    sosResult?.errorCode === 'AUTH_TOKEN_EXPIRED' ||
+    sosResult?.errorCode === 'AUTH_TOKEN_REVOKED' ||
+    sosResult?.errorCode === 'AUTH_TOKEN_INVALID' ||
+    (sosResult?.error && String(sosResult.error).toLowerCase().includes('unauthorized'))
   );
 
   // Debouncing & double-click protection ref
@@ -113,7 +125,7 @@ export default function SosModal({ visible, onClose }) {
 
       // Record full SOS event in Firestore sos_alerts
       try {
-        if (db) {
+        if (db && !result.authError) {
           const user = auth.currentUser;
           const calculatedStatus = result.overallStatus || (result.ok
             ? (result.acceptedAll ? 'ACCEPTED_ALL' : 'PARTIALLY_ACCEPTED')
@@ -425,7 +437,9 @@ export default function SosModal({ visible, onClose }) {
               </View>
 
               <Text style={[textStyle('heading', lang, colors.dangerText), styles.title]}>
-                {isSandboxBlocked
+                {isAuthError
+                  ? (isHindi ? 'सत्र सत्यापन विफल' : 'Authentication Required')
+                  : isSandboxBlocked
                   ? (isHindi ? 'Twilio सैंडबॉक्स प्रतिबंध' : 'Twilio Sandbox Active')
                   : (isHindi ? 'स्वचालित अलर्ट नहीं भेजा जा सका' : 'Automatic alert failed')}
               </Text>
@@ -433,7 +447,11 @@ export default function SosModal({ visible, onClose }) {
               <View style={[styles.goldBar, { backgroundColor: colors.dangerText }]} />
 
               <Text style={[textStyle('body', lang, colors.inkSoft), styles.subText]}>
-                {isSandboxBlocked
+                {isAuthError
+                  ? (isHindi
+                      ? 'आपके सत्र की पुष्टि नहीं हो सकी। कृपया SOS शुरू करने से पहले दोबारा साइन इन करें। आपातकाल में आप नीचे दिए गए हरे बटन से सीधे WhatsApp संदेश भेज सकते हैं।'
+                      : 'Your session could not be verified. Please sign in again before triggering SOS. In an emergency, you can send directly using the WhatsApp button below.')
+                  : isSandboxBlocked
                   ? (isHindi
                       ? 'Twilio सैंडबॉक्स मोड में आपातकालीन संदेश नहीं भेजे जा सकते। लाइव आपातकालीन अलर्ट के लिए प्रोडक्शन WhatsApp सेटअप आवश्यक है। कृपया नीचे दिए गए हरे बटन से स्वयं WhatsApp संदेश भेजें।'
                       : 'Twilio Sandbox mode cannot dispatch live emergency alerts. An approved production WhatsApp template is required. Please send manually using the WhatsApp button below.')

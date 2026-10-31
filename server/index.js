@@ -501,9 +501,13 @@ app.post('/api/twilio/test-connectivity', async (req, res) => {
   try {
     const user = await verifyFirebaseUser(req);
     if (!user) {
-      return res.status(401).json({
+      const status = req.authError?.status || 401;
+      const error = req.authError?.error || 'Unauthorized: A valid Firebase ID token is required to test connectivity.';
+      const errorCode = req.authError?.errorCode || 'UNAUTHORIZED';
+      return res.status(status).json({
         ok: false,
-        error: 'Unauthorized: A valid Firebase ID token is required to test connectivity.',
+        error,
+        errorCode,
       });
     }
 
@@ -545,9 +549,13 @@ app.post('/api/sos', async (req, res) => {
     // 1. Verify authenticated user identity from Firebase ID token
     const user = await verifyFirebaseUser(req);
     if (!user) {
-      return res.status(401).json({
+      const status = req.authError?.status || 401;
+      const error = req.authError?.error || 'Unauthorized: A valid Firebase ID token is required to trigger SOS alerts.';
+      const errorCode = req.authError?.errorCode || 'UNAUTHORIZED';
+      return res.status(status).json({
         ok: false,
-        error: 'Unauthorized: A valid Firebase ID token is required to trigger SOS alerts.',
+        error,
+        errorCode,
       });
     }
 

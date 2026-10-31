@@ -20,31 +20,43 @@ const withTimeout = (promise, ms) => {
 };
 
 /**
- * Resolves the currently authenticated Firebase user, waiting up to `timeoutMs`
- * for the async session restore from AsyncStorage to complete.
- * Using auth.currentUser synchronously at component mount time races against
- * the restore and can return null even when the user is logged in.
+ * Resolves the currently authenticated Firebase user.
+ * If auth.currentUser is already populated, returns it immediately.
+ * Otherwise, waits for onAuthStateChanged to restore the session from AsyncStorage.
  */
-function waitForAuthUser(timeoutMs = 5000) {
+export function getAuthenticatedUser(timeoutMs = 6000) {
+  if (auth.currentUser) {
+    console.log(`[SOS Auth] User present: true, UID: ${auth.currentUser.uid}`);
+    return Promise.resolve(auth.currentUser);
+  }
+
+  console.log('[SOS Auth] auth.currentUser is null. Waiting for onAuthStateChanged session restore...');
   return new Promise((resolve) => {
-    // If auth has already resolved its state, currentUser is immediately available.
-    if (auth.currentUser !== undefined) {
-      // currentUser is null (signed out) or a User object — either way, resolved.
-      // Note: Firebase sets currentUser to null (not undefined) once resolved.
-      resolve(auth.currentUser);
-      return;
-    }
+    let resolved = false;
     const timer = setTimeout(() => {
-      unsubscribe();
-      resolve(null);
+      if (!resolved) {
+        resolved = true;
+        unsubscribe();
+        const user = auth.currentUser || null;
+        console.log(`[SOS Auth] Session restore wait timed out. User present: ${Boolean(user)}`);
+        resolve(user);
+      }
     }, timeoutMs);
+
     const unsubscribe = onAuthStateChanged(auth, (user) => {
-      clearTimeout(timer);
-      unsubscribe();
-      resolve(user);
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timer);
+        unsubscribe();
+        console.log(`[SOS Auth] onAuthStateChanged resolved. User present: ${Boolean(user)}, UID: ${user?.uid || 'none'}`);
+        resolve(user || null);
+      }
     });
   });
 }
+
+// Alias for backward compatibility
+export const waitForAuthUser = getAuthenticatedUser;
 
 /**
  * 1. Asks for foreground permission once
@@ -205,16 +217,102 @@ export function buildFallbackWaLink(firstContact, name, reason, location) {
  * Sends SOS alert to backend and returns response + fallback wa.me link
  */
 export async function sendSOS({ reason = 'manual' }) {
-  const user = await waitForAuthUser();
-  const name = user?.displayName || user?.email?.split('@')[0] || 'Sahaara Member';
+  console.log(`[SOS Service] Starting SOS alert flow with reason: ${reason}`);
 
-  // 1. Fetch contacts
+  // 1. Obtain authenticated Firebase user
+  const user = await getAuthenticatedUser();
+  if (!user) {
+    console.warn('[SOS Auth] Authentication required: No active Firebase session found.');
+    return {
+      ok: false,
+      status: 401,
+      authError: true,
+      errorCode: 'AUTHENTICATION_REQUIRED',
+      overallStatus: 'FAILED',
+      error: 'AUTHENTICATION_REQUIRED',
+      errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
+      location: null,
+      contacts: [],
+      fallbackWaLink: null,
+      results: [],
+      totalContacts: 0,
+      acceptedCount: 0,
+      acceptedAll: false,
+      provider: 'twilio_whatsapp',
+      mode: 'sandbox',
+      deliveryCallbacksEnabled: false,
+      alertId: null,
+    };
+  }
+
+  const name = user.displayName || user.email?.split('@')[0] || 'Sahaara Member';
+
+  // 2. Fetch contacts
   const contacts = await getEmergencyContacts();
 
-  // 2. Fetch location
+  // 3. Fetch location
   const location = await getCurrentLocation();
 
-  // 3. Prepare payload for /api/sos
+  // 4. Retrieve ID token using Firebase Authentication SDK
+  let idToken = null;
+  try {
+    idToken = await user.getIdToken();
+    console.log(`[SOS Auth] Token acquisition succeeded: true, length: ${idToken ? idToken.length : 0}`);
+  } catch (tokenErr) {
+    console.warn('[SOS Auth] getIdToken failed, attempting force refresh:', tokenErr.message);
+    try {
+      idToken = await user.getIdToken(true);
+      console.log(`[SOS Auth] Token force refresh succeeded: true, length: ${idToken ? idToken.length : 0}`);
+    } catch (refreshErr) {
+      console.error('[SOS Auth] Force token refresh failed:', refreshErr.message);
+      return {
+        ok: false,
+        status: 401,
+        authError: true,
+        errorCode: 'TOKEN_ACQUISITION_FAILED',
+        overallStatus: 'FAILED',
+        error: 'TOKEN_ACQUISITION_FAILED',
+        errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
+        location,
+        contacts,
+        fallbackWaLink: buildFallbackWaLink(contacts[0] || null, name, reason, location),
+        results: [],
+        totalContacts: contacts.length,
+        acceptedCount: 0,
+        acceptedAll: false,
+        provider: 'twilio_whatsapp',
+        mode: 'sandbox',
+        deliveryCallbacksEnabled: false,
+        alertId: null,
+      };
+    }
+  }
+
+  if (!idToken) {
+    console.warn('[SOS Auth] Acquired ID token is empty.');
+    return {
+      ok: false,
+      status: 401,
+      authError: true,
+      errorCode: 'TOKEN_EMPTY',
+      overallStatus: 'FAILED',
+      error: 'TOKEN_EMPTY',
+      errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
+      location,
+      contacts,
+      fallbackWaLink: buildFallbackWaLink(contacts[0] || null, name, reason, location),
+      results: [],
+      totalContacts: contacts.length,
+      acceptedCount: 0,
+      acceptedAll: false,
+      provider: 'twilio_whatsapp',
+      mode: 'sandbox',
+      deliveryCallbacksEnabled: false,
+      alertId: null,
+    };
+  }
+
+  // 5. Prepare payload for /api/sos
   const payload = {
     name,
     reason,
@@ -235,14 +333,12 @@ export async function sendSOS({ reason = 'manual' }) {
     const endpoint = `${baseUrl}/api/sos`;
 
     console.log(`[SOS Service] Sending SOS (${reason}) to ${endpoint}`);
+    console.log('[SOS Auth] Authorization header attached: true');
 
-    const idToken = user ? await user.getIdToken().catch(() => null) : null;
     const headers = {
       'Content-Type': 'application/json',
+      'Authorization': `Bearer ${idToken}`,
     };
-    if (idToken) {
-      headers['Authorization'] = `Bearer ${idToken}`;
-    }
 
     const res = await fetch(endpoint, {
       method: 'POST',
@@ -250,9 +346,35 @@ export async function sendSOS({ reason = 'manual' }) {
       body: JSON.stringify(payload),
     });
 
-    const data = await res.json();
+    const data = await res.json().catch(() => ({}));
+
+    if (res.status === 401) {
+      console.warn('[SOS Service] Backend rejected token with 401:', data.error);
+      return {
+        ok: false,
+        status: 401,
+        authError: true,
+        errorCode: data.errorCode || 'UNAUTHORIZED',
+        overallStatus: 'FAILED',
+        error: data.error || 'Unauthorized: A valid Firebase ID token is required.',
+        errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
+        location,
+        contacts,
+        fallbackWaLink,
+        results: [],
+        totalContacts: contacts.length,
+        acceptedCount: 0,
+        acceptedAll: false,
+        provider: 'twilio_whatsapp',
+        mode: 'sandbox',
+        deliveryCallbacksEnabled: false,
+        alertId: null,
+      };
+    }
+
     return {
       ok: data.ok || false,
+      status: res.status,
       overallStatus: data.overallStatus || (data.ok ? (data.acceptedAll ? 'ACCEPTED_ALL' : 'PARTIALLY_ACCEPTED') : 'FAILED'),
       acceptedAll: data.acceptedAll || false,
       acceptedCount: data.acceptedCount || 0,
@@ -262,6 +384,7 @@ export async function sendSOS({ reason = 'manual' }) {
       contacts,
       fallbackWaLink,
       error: data.error,
+      errorCode: data.errorCode,
       provider: data.provider || 'twilio_whatsapp',
       mode: data.mode || 'sandbox',
       deliveryCallbacksEnabled: data.deliveryCallbacksEnabled || false,

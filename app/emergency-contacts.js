@@ -36,6 +36,7 @@ import ScreenHeader from '../components/ScreenHeader';
 import ThemedTextField from '../components/ThemedTextField';
 import ThemedButton from '../components/ThemedButton';
 import { getApiBaseUrl } from '../services/saathiService';
+import { getAuthenticatedUser } from '../services/sos';
 
 export default function EmergencyContactsScreen() {
   const router = useRouter();
@@ -236,12 +237,38 @@ export default function EmergencyContactsScreen() {
 
     try {
       const baseUrl = getApiBaseUrl();
-      const user = auth.currentUser;
-      const elderName = user?.displayName || user?.email?.split('@')[0] || 'Sahaara Member';
+      const user = await getAuthenticatedUser();
+      if (!user) {
+        setTestStatus('error');
+        setTestErrorMsg(
+          isHindi
+            ? 'आपके सत्र की पुष्टि नहीं हो सकी। कृपया दोबारा साइन इन करें।'
+            : 'Your session could not be verified. Please sign in again.'
+        );
+        return;
+      }
 
-      const idToken = user ? await user.getIdToken().catch(() => null) : null;
-      const headers = { 'Content-Type': 'application/json' };
-      if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
+      let idToken = null;
+      try {
+        idToken = await user.getIdToken();
+      } catch (_) {
+        idToken = await user.getIdToken(true).catch(() => null);
+      }
+
+      if (!idToken) {
+        setTestStatus('error');
+        setTestErrorMsg(
+          isHindi
+            ? 'सत्र टोकन प्राप्त नहीं हो सका।'
+            : 'Could not obtain session token. Please sign in again.'
+        );
+        return;
+      }
+
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${idToken}`,
+      };
 
       const res = await fetch(`${baseUrl}/api/twilio/test-connectivity`, {
         method: 'POST',

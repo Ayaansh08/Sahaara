@@ -1171,6 +1171,119 @@ async function runAllTests() {
     assert.strictEqual(doc.data().guardianResults[0].status, STATUS.DELIVERED, 'Must not regress from DELIVERED');
   });
 
+  // Test 33: REGRESSION - Distinguishable errors for missing, malformed, and empty Authorization header
+  await runTest('33. REGRESSION: Distinguishable errors for missing, malformed, and empty Authorization header', async () => {
+    // 1. Missing Authorization header
+    const resMissing = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      body: { reason: 'manual' },
+    });
+    assert.strictEqual(resMissing.status, 401);
+    assert.strictEqual(resMissing.body.ok, false);
+    assert.strictEqual(resMissing.body.errorCode, 'AUTH_HEADER_MISSING');
+    assert.ok(resMissing.body.error.includes('Missing Authorization header'));
+
+    // 2. Malformed Authorization header (non-Bearer)
+    const resMalformed = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: { Authorization: 'Basic dXNlcjpwYXNz' },
+      body: { reason: 'manual' },
+    });
+    assert.strictEqual(resMalformed.status, 401);
+    assert.strictEqual(resMalformed.body.ok, false);
+    assert.strictEqual(resMalformed.body.errorCode, 'AUTH_HEADER_MALFORMED');
+    assert.ok(resMalformed.body.error.includes('Malformed Authorization header'));
+
+    // 3. Empty Bearer token
+    const resEmpty = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: { Authorization: 'Bearer   ' },
+      body: { reason: 'manual' },
+    });
+    assert.strictEqual(resEmpty.status, 401);
+    assert.strictEqual(resEmpty.body.ok, false);
+    assert.strictEqual(resEmpty.body.errorCode, 'AUTH_TOKEN_EMPTY');
+    assert.ok(resEmpty.body.error.includes('Bearer token is empty'));
+  });
+
+  // Test 34: REGRESSION - Malformed or invalid ID tokens produce distinguishable AUTH_TOKEN_MALFORMED
+  await runTest('34. REGRESSION: Malformed or invalid ID tokens produce distinguishable AUTH_TOKEN_MALFORMED', async () => {
+    const resInvalid = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: { Authorization: 'Bearer totally.invalid.jwt.token' },
+      body: { reason: 'manual' },
+    });
+    assert.strictEqual(resInvalid.status, 401);
+    assert.strictEqual(resInvalid.body.ok, false);
+    assert.strictEqual(resInvalid.body.errorCode, 'AUTH_TOKEN_MALFORMED');
+    assert.ok(resInvalid.body.error.includes('Invalid or malformed Firebase ID token'));
+  });
+
+  // Test 35: REGRESSION - Backend derives identity strictly from verified token and ignores client-supplied UID
+  await runTest('35. REGRESSION: Backend derives identity strictly from verified token and ignores client-supplied UID', async () => {
+    let queriedUid = null;
+    setTestMockContactsResolver((uid) => {
+      queriedUid = uid;
+      return [{ name: 'Son', phone: '9876543210', relation: 'Son' }];
+    });
+
+    const res = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/sos',
+      headers: {
+        Authorization: 'Bearer mock-token-spoof-defense-user',
+        'x-test-auth-mock': 'true',
+        'x-test-user-name': 'Verified Elder',
+      },
+      body: {
+        reason: 'manual',
+        uid: 'attacker-spoofed-uid',
+        userId: 'attacker-spoofed-uid',
+        email: 'attacker@evil.com',
+      },
+    });
+
+    // In Sandbox mode, returns SANDBOX_MODE_RESTRICTION, but verified user was spoof-defense-user
+    assert.strictEqual(queriedUid, 'spoof-defense-user', 'Contacts must be resolved for verified token UID, not client body UID');
+    assert.strictEqual(res.body.code, 'SANDBOX_MODE_RESTRICTION');
+  });
+
+  // Test 36: REGRESSION - /api/twilio/test-connectivity requires valid Firebase token and reports distinguishable error codes
+  await runTest('36. REGRESSION: /api/twilio/test-connectivity requires valid Firebase token and reports distinguishable error codes', async () => {
+    // Missing header
+    const resMissing = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/test-connectivity',
+    });
+    assert.strictEqual(resMissing.status, 401);
+    assert.strictEqual(resMissing.body.errorCode, 'AUTH_HEADER_MISSING');
+
+    // Malformed header
+    const resMalformed = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/test-connectivity',
+      headers: { Authorization: 'Token abc123xyz' },
+    });
+    assert.strictEqual(resMalformed.status, 401);
+    assert.strictEqual(resMalformed.body.errorCode, 'AUTH_HEADER_MALFORMED');
+
+    // Valid authenticated token
+    const resValid = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/test-connectivity',
+      headers: {
+        Authorization: 'Bearer mock-token-test-connectivity-user',
+        'x-test-auth-mock': 'true',
+      },
+    });
+    // Responds 200 or 503 depending on Twilio mock configuration, but MUST NOT be 401
+    assert.notStrictEqual(resValid.status, 401, 'Valid authenticated token must pass authentication');
+  });
+
 
   console.log('\n================================================================');
   console.log(`Results: ${passedCount} passed, ${failedCount} failed.`);

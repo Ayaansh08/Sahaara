@@ -12,7 +12,9 @@
  * 4. Gracefully saves or updates the Firestore SOS alert document.
  */
 
-const admin = require('firebase-admin');
+const { initializeApp, getApps, getApp } = require('firebase-admin/app');
+const { getAuth } = require('firebase-admin/auth');
+const { getFirestore, FieldValue } = require('firebase-admin/firestore');
 const fetch = require('node-fetch');
 
 let customFirestoreDb = null;
@@ -23,23 +25,45 @@ function setCustomFirestoreDb(db) {
 
 // Initialize Firebase Admin once if not already initialized
 function getAdminApp() {
-  if (admin.apps.length > 0) return admin;
+  const apps = getApps();
+  if (apps.length > 0) return apps[0];
+  const projectId = process.env.FIREBASE_PROJECT_ID || 'sahaara-93ecc';
   try {
-    admin.initializeApp({
-      projectId: process.env.FIREBASE_PROJECT_ID || 'sahaara-93ecc',
-    });
+    return initializeApp({ projectId });
   } catch (err) {
     console.warn('[Firebase Admin] Init notice:', err.message);
+    const existing = getApps();
+    return existing.length > 0 ? existing[0] : null;
   }
-  return admin;
+}
+
+function getAdminAuth() {
+  const app = getAdminApp();
+  if (!app) return null;
+  try {
+    return getAuth(app);
+  } catch (err) {
+    console.warn('[Firebase Admin] Auth init notice:', err.message);
+    return null;
+  }
 }
 
 function getFirestoreDb() {
   if (customFirestoreDb) return customFirestoreDb;
+  // If no service account credentials or ADC environment variable is defined,
+  // skip local Admin Firestore to avoid gRPC ADC metadata server hangs,
+  // and use Strategy 2 (Firestore REST API with user's verified token).
+  const hasCredentials = Boolean(
+    process.env.GOOGLE_APPLICATION_CREDENTIALS ||
+    process.env.FIREBASE_SERVICE_ACCOUNT
+  );
+  if (!hasCredentials) {
+    return null;
+  }
   try {
-    const adminApp = getAdminApp();
-    if (adminApp && typeof adminApp.firestore === 'function') {
-      return adminApp.firestore();
+    const app = getAdminApp();
+    if (app) {
+      return getFirestore(app);
     }
   } catch (err) {
     // Admin firestore may not be configured
@@ -50,19 +74,52 @@ function getFirestoreDb() {
 /**
  * Extracts and verifies the Firebase ID token from Authorization header.
  * Authorization: Bearer <idToken>
+ * 
+ * Provides safe diagnostic logging without exposing sensitive tokens or secrets.
+ * Produces distinguishable errors for missing, malformed, expired, revoked, or invalid tokens.
  */
 async function verifyFirebaseUser(req) {
   const authHeader = req.headers.authorization;
-  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+  const hasAuthHeader = Boolean(authHeader);
+  console.log(`[Auth] Authorization header present: ${hasAuthHeader}`);
+
+  if (!hasAuthHeader) {
+    req.authError = {
+      status: 401,
+      errorCode: 'AUTH_HEADER_MISSING',
+      error: 'Unauthorized: Missing Authorization header. A valid Firebase ID token is required.',
+    };
     return null;
   }
-  const token = authHeader.split('Bearer ')[1].trim();
-  if (!token) return null;
+
+  const rawHeader = typeof authHeader === 'string' ? authHeader.trim() : '';
+  const isBearer = rawHeader.startsWith('Bearer ') || rawHeader === 'Bearer';
+  console.log(`[Auth] Bearer format valid: ${isBearer}`);
+
+  if (!isBearer) {
+    req.authError = {
+      status: 401,
+      errorCode: 'AUTH_HEADER_MALFORMED',
+      error: 'Unauthorized: Malformed Authorization header. Expected "Bearer <token>".',
+    };
+    return null;
+  }
+
+  const token = rawHeader === 'Bearer' ? '' : rawHeader.substring(7).trim();
+  if (!token) {
+    req.authError = {
+      status: 401,
+      errorCode: 'AUTH_TOKEN_EMPTY',
+      error: 'Unauthorized: Bearer token is empty.',
+    };
+    return null;
+  }
 
   // Support mocked tokens strictly during automated tests when NODE_ENV === 'test'
   if (process.env.NODE_ENV === 'test' && req.headers['x-test-auth-mock'] === 'true') {
     if (token.startsWith('mock-token-')) {
       const uid = token.replace('mock-token-', '');
+      console.log(`[Auth] Mock token accepted for test UID: ${uid}`);
       return {
         uid,
         email: `${uid}@test.sahaara.app`,
@@ -73,8 +130,19 @@ async function verifyFirebaseUser(req) {
   }
 
   try {
-    const adminApp = getAdminApp();
-    const decoded = await adminApp.auth().verifyIdToken(token);
+    const auth = getAdminAuth();
+    if (!auth) {
+      console.error('[Auth] Firebase Admin Auth instance could not be initialized.');
+      req.authError = {
+        status: 500,
+        errorCode: 'AUTH_ADMIN_INIT_FAILED',
+        error: 'Internal server error: Firebase Admin could not be initialized.',
+      };
+      return null;
+    }
+
+    const decoded = await auth.verifyIdToken(token);
+    console.log(`[Auth] Firebase Admin token verification succeeded for UID: ${decoded.uid}`);
     return {
       uid: decoded.uid,
       email: decoded.email || `${decoded.uid}@sahaara.app`,
@@ -82,7 +150,32 @@ async function verifyFirebaseUser(req) {
       token,
     };
   } catch (err) {
-    console.warn('[Auth] ID token verification failed:', err.message);
+    console.warn(`[Auth] Token verification failed [${err.code || 'UNKNOWN'}]: ${err.message}`);
+
+    let status = 401;
+    let errorCode = 'AUTH_TOKEN_INVALID';
+    let errorMessage = 'Unauthorized: A valid Firebase ID token is required to trigger SOS alerts.';
+
+    if (err.code === 'auth/id-token-expired') {
+      errorCode = 'AUTH_TOKEN_EXPIRED';
+      errorMessage = 'Unauthorized: Firebase ID token has expired. Please refresh your session.';
+    } else if (err.code === 'auth/id-token-revoked') {
+      errorCode = 'AUTH_TOKEN_REVOKED';
+      errorMessage = 'Unauthorized: Firebase ID token has been revoked.';
+    } else if (err.code === 'auth/argument-error' || err.code === 'auth/invalid-id-token') {
+      errorCode = 'AUTH_TOKEN_MALFORMED';
+      errorMessage = 'Unauthorized: Invalid or malformed Firebase ID token.';
+    } else if (err.code === 'app/network-error' || err.code === 'auth/internal-error') {
+      status = 502;
+      errorCode = 'AUTH_VERIFICATION_NETWORK_ERROR';
+      errorMessage = 'Unable to verify authentication with Firebase. Please check network connectivity.';
+    }
+
+    req.authError = {
+      status,
+      errorCode,
+      error: errorMessage,
+    };
     return null;
   }
 }
@@ -213,7 +306,7 @@ async function createInitialSosAlertRecord({
     try {
       const docRef = await db.collection('sos_alerts').add({
         ...alertPayload,
-        timestamp: admin.firestore ? admin.firestore.FieldValue.serverTimestamp() : new Date(),
+        timestamp: FieldValue && typeof FieldValue.serverTimestamp === 'function' ? FieldValue.serverTimestamp() : new Date(),
       });
       return docRef.id;
     } catch (adminErr) {
@@ -350,7 +443,7 @@ async function recordSosAlert({
     try {
       const docRef = await db.collection('sos_alerts').add({
         ...alertPayload,
-        timestamp: admin.firestore ? admin.firestore.FieldValue.serverTimestamp() : new Date(),
+        timestamp: FieldValue && typeof FieldValue.serverTimestamp === 'function' ? FieldValue.serverTimestamp() : new Date(),
       });
       return docRef.id;
     } catch (adminErr) {
