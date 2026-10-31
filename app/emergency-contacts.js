@@ -243,13 +243,9 @@ export default function EmergencyContactsScreen() {
       const headers = { 'Content-Type': 'application/json' };
       if (idToken) headers['Authorization'] = `Bearer ${idToken}`;
 
-      const res = await fetch(`${baseUrl}/api/sos`, {
+      const res = await fetch(`${baseUrl}/api/twilio/test-connectivity`, {
         method: 'POST',
         headers,
-        body: JSON.stringify({
-          name: elderName,
-          reason: 'test',
-        }),
       });
 
       const data = await res.json();

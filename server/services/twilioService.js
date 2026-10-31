@@ -244,6 +244,18 @@ async function sendTwilioWhatsAppMessage({
     };
   }
 
+  // 4. 🚨 SANDBOX RESTRICTION: In Sandbox mode, actual SOS alerts cannot be dispatched
+  // Arbitrary Content SIDs are NOT permitted to bypass this restriction
+  if (config.isSandbox) {
+    return {
+      accepted: false,
+      status: STATUS.FAILED,
+      error: 'Twilio WhatsApp is operating in Sandbox mode. The Sandbox does not support custom emergency templates and cannot dispatch SAHAARA SOS alerts. Live SOS dispatch requires a production Twilio WhatsApp sender (TWILIO_WHATSAPP_MODE=production) with an approved Meta emergency template.',
+      code: 'SANDBOX_MODE_RESTRICTION',
+      messageSid: null,
+    };
+  }
+
   // 4. Validate phone number
   const formattedTo = formatWhatsAppAddress(toPhone);
   if (!formattedTo) {
@@ -350,6 +362,35 @@ async function sendSosAlertsToGuardians({
   sleepFn = null,
 }) {
   const config = getTwilioConfig(configOverrides);
+
+  // 🚨 SANDBOX RESTRICTION: Block actual SOS dispatch in Sandbox mode
+  if (config.isSandbox) {
+    return {
+      ok: false,
+      overallStatus: 'FAILED',
+      acceptedAll: false,
+      acceptedCount: 0,
+      totalContacts: guardians.length,
+      code: 'SANDBOX_MODE_RESTRICTION',
+      error: 'Twilio WhatsApp is operating in Sandbox mode. The Sandbox does not support custom emergency templates and cannot dispatch SAHAARA SOS alerts. Live SOS dispatch requires a production Twilio WhatsApp sender (TWILIO_WHATSAPP_MODE=production) with an approved Meta emergency template.',
+      results: guardians.map((g) => ({
+        name: g.name || 'Guardian',
+        phone: g.phone && g.phone.length >= 4 ? '...' + g.phone.slice(-4) : '****',
+        rawPhone: g.phone,
+        accepted: false,
+        status: STATUS.FAILED,
+        messageSid: null,
+        code: 'SANDBOX_MODE_RESTRICTION',
+        error: 'Blocked: Twilio Sandbox cannot dispatch custom emergency templates',
+      })),
+      deliveryCallbacksEnabled: false,
+      statusCallbackUrl: null,
+      mode: config.mode,
+      provider: 'twilio_whatsapp',
+      sosDispatched: false,
+    };
+  }
+
   const results = [];
   const sleep = sleepFn || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
 
@@ -573,6 +614,78 @@ async function processStatusCallback({
   };
 }
 
+
+/**
+ * Verifies Twilio API connectivity without dispatching an emergency alert.
+ * Clearly separates connectivity testing from actual SOS dispatch and delivery.
+ */
+async function verifyTwilioConnectivity({ configOverrides = {}, client = null } = {}) {
+  const config = getTwilioConfig(configOverrides);
+
+  if (!config.isConfigured) {
+    return {
+      ok: false,
+      twilioApiConnected: false,
+      sosDispatched: false,
+      deliveryConfirmed: false,
+      mode: config.mode,
+      code: 'CONFIG_MISSING',
+      error: 'Twilio credentials incomplete in server environment',
+    };
+  }
+
+  const twilioClient = createTwilioClient(config, client);
+  if (!twilioClient) {
+    return {
+      ok: false,
+      twilioApiConnected: false,
+      sosDispatched: false,
+      deliveryConfirmed: false,
+      mode: config.mode,
+      code: 'CLIENT_INIT_FAILED',
+      error: 'Failed to initialize Twilio client',
+    };
+  }
+
+  try {
+    let accountInfo = null;
+    if (twilioClient.api && twilioClient.api.accounts) {
+      accountInfo = await twilioClient.api.accounts(config.accountSid).fetch();
+    } else if (twilioClient.messages) {
+      accountInfo = { status: 'active', friendlyName: 'Mock Account' };
+    }
+
+    const isSandbox = config.isSandbox;
+    const isApptReminder = isAppointmentReminderContentSid(config.contentSid);
+
+    return {
+      ok: true,
+      twilioApiConnected: true,
+      sosDispatched: false,
+      deliveryConfirmed: false,
+      accountStatus: accountInfo?.status || 'active',
+      mode: config.mode,
+      from: config.from,
+      contentSidConfigured: Boolean(config.contentSid),
+      isAppointmentReminderTemplate: isApptReminder,
+      statusCallbackConfigured: Boolean(config.statusCallbackUrl && config.statusCallbackUrl.startsWith('https://')),
+      message: isSandbox
+        ? 'Twilio API connectivity verified (Sandbox). Note: Sandbox mode cannot dispatch live emergency alerts. A registered production sender with an approved emergency template is required for live SOS delivery.'
+        : 'Twilio API connectivity verified in production mode.',
+    };
+  } catch (err) {
+    return {
+      ok: false,
+      twilioApiConnected: false,
+      sosDispatched: false,
+      deliveryConfirmed: false,
+      mode: config.mode,
+      code: err.code || 'TWILIO_AUTH_FAILED',
+      error: 'Twilio API authentication failed: ' + err.message,
+    };
+  }
+}
+
 module.exports = {
   STATUS,
   STATUS_RANK,
@@ -586,6 +699,7 @@ module.exports = {
   mapTwilioStatus,
   sendTwilioWhatsAppMessage,
   sendSosAlertsToGuardians,
+  verifyTwilioConnectivity,
   trackMessage,
   getTrackedMessage,
   clearTrackedMessages,

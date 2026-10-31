@@ -1,4 +1,4 @@
-﻿const express = require('express');
+const express = require('express');
 const cors = require('cors');
 const fetch = require('node-fetch');
 const multer = require('multer');
@@ -43,6 +43,7 @@ const {
   validateTwilioWebhookSignature,
   processStatusCallback,
   isAppointmentReminderContentSid,
+  verifyTwilioConnectivity,
 } = require('./services/twilioService');
 
 const {
@@ -464,6 +465,29 @@ app.post('/api/twilio/status-callback', async (req, res) => {
   }
 });
 
+// --- Dedicated Twilio Connectivity Verification -------------------------------
+/**
+ * Verifies Twilio API credentials and connectivity without sending any messages,
+ * creating SOS records, or falsely confirming delivery.
+ */
+app.post('/api/twilio/test-connectivity', async (req, res) => {
+  try {
+    const user = await verifyFirebaseUser(req);
+    if (!user) {
+      return res.status(401).json({
+        ok: false,
+        error: 'Unauthorized: A valid Firebase ID token is required to test connectivity.',
+      });
+    }
+
+    const result = await verifyTwilioConnectivity();
+    return res.status(result.ok ? 200 : 503).json(result);
+  } catch (err) {
+    console.error('Error in test-connectivity:', err);
+    return res.status(500).json({ ok: false, error: 'Internal server error testing connectivity' });
+  }
+});
+
 // --- Emergency WhatsApp SOS Endpoint (Twilio WhatsApp) -----------------------
 /**
  * Triggers an SOS emergency alert via Twilio WhatsApp.
@@ -536,6 +560,80 @@ app.post('/api/sos', async (req, res) => {
       });
     }
 
+    // 4. Validate location (lat between -90 and 90, lng between -180 and 180)
+    let validLocation = null;
+    if (
+      location &&
+      typeof location.lat === 'number' &&
+      !isNaN(location.lat) &&
+      location.lat >= -90 &&
+      location.lat <= 90 &&
+      typeof location.lng === 'number' &&
+      !isNaN(location.lng) &&
+      location.lng >= -180 &&
+      location.lng <= 180
+    ) {
+      validLocation = {
+        lat: location.lat,
+        lng: location.lng,
+        accuracy: typeof location.accuracy === 'number' ? location.accuracy : null,
+        address: location.address ? String(location.address).trim() : null,
+        ageSec: typeof location.ageSec === 'number' ? location.ageSec : null,
+      };
+    }
+
+    // Dedicated connectivity test when reason is 'test' (does not create SOS or dispatch alerts)
+    if (reason === 'test') {
+      const connResult = await verifyTwilioConnectivity();
+      return res.json({
+        ok: connResult.ok,
+        overallStatus: connResult.ok ? 'ACCEPTED_ALL' : 'FAILED',
+        isConnectivityTest: true,
+        twilioApiConnected: connResult.twilioApiConnected,
+        sosDispatched: false,
+        deliveryConfirmed: false,
+        mode: twilioConfig.mode,
+        message: connResult.message,
+        results: [],
+        provider: 'twilio_whatsapp',
+      });
+    }
+
+    // 5. In Sandbox mode: block actual SOS alerts upfront
+    // Arbitrary Content SIDs cannot bypass this restriction
+    if (twilioConfig.isSandbox) {
+      console.warn('[SOS] Refusing live SOS dispatch in Sandbox mode for ' + user.name + ' (' + user.uid + ').');
+      
+      const contacts = await getUserEmergencyContacts(user.uid, user.token, req.body._testMockContacts);
+      
+      const alertId = await recordSosAlert({
+        userId: user.uid,
+        userEmail: user.email,
+        userName: user.name,
+        location: validLocation,
+        status: 'FAILED',
+        overallStatus: 'FAILED',
+        results: [],
+        contacts,
+        reason,
+        provider: 'twilio_whatsapp',
+        token: user.token,
+      });
+
+      return res.status(400).json({
+        ok: false,
+        overallStatus: 'FAILED',
+        code: 'SANDBOX_MODE_RESTRICTION',
+        error: 'Twilio WhatsApp is operating in Sandbox mode. The Sandbox does not support custom emergency templates and cannot dispatch SAHAARA SOS alerts. Live SOS dispatch requires a production Twilio WhatsApp sender (TWILIO_WHATSAPP_MODE=production) with an approved Meta emergency template.',
+        mode: 'sandbox',
+        sosDispatched: false,
+        results: [],
+        location: validLocation,
+        alertId,
+        provider: 'twilio_whatsapp',
+      });
+    }
+
     // 4. Validate Content SID & enforce Sandbox template restrictions
     const activeContentSid = (req.body.contentSid || twilioConfig.contentSid || '').trim();
     if (!activeContentSid) {
@@ -574,27 +672,7 @@ app.post('/api/sos', async (req, res) => {
       });
     }
 
-    // 6. Validate location (lat between -90 and 90, lng between -180 and 180)
-    let validLocation = null;
-    if (
-      location &&
-      typeof location.lat === 'number' &&
-      !isNaN(location.lat) &&
-      location.lat >= -90 &&
-      location.lat <= 90 &&
-      typeof location.lng === 'number' &&
-      !isNaN(location.lng) &&
-      location.lng >= -180 &&
-      location.lng <= 180
-    ) {
-      validLocation = {
-        lat: location.lat,
-        lng: location.lng,
-        accuracy: typeof location.accuracy === 'number' ? location.accuracy : null,
-        address: location.address ? String(location.address).trim() : null,
-        ageSec: typeof location.ageSec === 'number' ? location.ageSec : null,
-      };
-    }
+
 
     // Current time in IST
     const istTime = new Date().toLocaleString('en-IN', {

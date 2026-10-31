@@ -1,4 +1,4 @@
-/**
+﻿/**
  * components/SosModal.js
  * Calm senior-first two-step emergency confirm modal.
  * Integrates WhatsApp emergency alert via Meta WhatsApp Cloud API backend & foreground GPS location.
@@ -47,6 +47,10 @@ export default function SosModal({ visible, onClose }) {
   const [step, setStep] = useState('idle'); // 'idle' | 'locating' | 'sending' | 'result'
   const [resultState, setResultState] = useState(null); // 'success' | 'failure'
   const [sosResult, setSosResult] = useState(null);
+  const isSandboxBlocked = Boolean(
+    sosResult?.code === 'SANDBOX_MODE_RESTRICTION' ||
+    (sosResult?.error && String(sosResult.error).includes('Sandbox mode'))
+  );
 
   // Debouncing & double-click protection ref
   const isTriggeringRef = useRef(false);
@@ -421,18 +425,23 @@ export default function SosModal({ visible, onClose }) {
               </View>
 
               <Text style={[textStyle('heading', lang, colors.dangerText), styles.title]}>
-                {isHindi ? 'स्वचालित अलर्ट नहीं भेजा जा सका' : 'Automatic alert failed'}
+                {isSandboxBlocked
+                  ? (isHindi ? 'Twilio सैंडबॉक्स प्रतिबंध' : 'Twilio Sandbox Active')
+                  : (isHindi ? 'स्वचालित अलर्ट नहीं भेजा जा सका' : 'Automatic alert failed')}
               </Text>
 
               <View style={[styles.goldBar, { backgroundColor: colors.dangerText }]} />
 
               <Text style={[textStyle('body', lang, colors.inkSoft), styles.subText]}>
-                {isHindi
-                  ? 'नेटवर्क या सर्वर समस्या के कारण स्वचालित अलर्ट नहीं भेजा जा सका। कृपया नीचे दिए गए बटन से सीधे व्हाट्सएप खोलकर संदेश भेजें।'
-                  : 'Could not send the automatic alert due to a network or server issue. Please send manually using the WhatsApp button below.'}
+                {isSandboxBlocked
+                  ? (isHindi
+                      ? 'Twilio सैंडबॉक्स मोड में आपातकालीन संदेश नहीं भेजे जा सकते। लाइव आपातकालीन अलर्ट के लिए प्रोडक्शन WhatsApp सेटअप आवश्यक है। कृपया नीचे दिए गए हरे बटन से स्वयं WhatsApp संदेश भेजें।'
+                      : 'Twilio Sandbox mode cannot dispatch live emergency alerts. An approved production WhatsApp template is required. Please send manually using the WhatsApp button below.')
+                  : (isHindi
+                      ? 'नेटवर्क या सर्वर समस्या के कारण स्वचालित अलर्ट नहीं भेजा जा सका। कृपया नीचे दिए गए WhatsApp बटन से सीधे संदेश भेजें।'
+                      : 'Could not send the automatic alert due to a network or server issue. Please send manually using the WhatsApp button below.')}
               </Text>
 
-              {/* Informative error snippet if available */}
               {sosResult?.error ? (
                 <View style={styles.errorSnippetBox}>
                   <Ionicons name="alert-outline" size={18} color={colors.dangerText} />

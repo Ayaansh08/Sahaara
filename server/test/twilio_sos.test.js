@@ -1,8 +1,8 @@
-﻿/**
- * scratch/test_twilio_sos.js
+/**
+ * server/test/twilio_sos.test.js
  * 
- * Comprehensive automated test suite verifying all 17 required scenarios
- * for SAHAARA Twilio WhatsApp SOS integration (plus Appointment Reminder blocking).
+ * Comprehensive automated test suite verifying all required scenarios
+ * and regression checks for SAHAARA Twilio WhatsApp SOS integration.
  * Uses mocked Twilio SDK calls — sends ZERO real WhatsApp messages.
  */
 
@@ -21,6 +21,7 @@ const {
   isAppointmentReminderContentSid,
   sendTwilioWhatsAppMessage,
   sendSosAlertsToGuardians,
+  verifyTwilioConnectivity,
   trackMessage,
   getTrackedMessage,
   clearTrackedMessages,
@@ -31,7 +32,7 @@ const {
 
 const app = require('../index');
 
-// Test runner helper
+// Test runner tracking
 let passedCount = 0;
 let failedCount = 0;
 
@@ -71,6 +72,14 @@ function createMockTwilioClient(options = {}) {
           from: params.from,
         };
       },
+    },
+    api: {
+      accounts: () => ({
+        fetch: async () => ({
+          status: 'active',
+          friendlyName: 'Mock Account',
+        }),
+      }),
     },
   };
 }
@@ -130,11 +139,11 @@ function makeRequest(appInstance, { method, path: reqPath, headers = {}, body = 
 
 async function runAllTests() {
   console.log('================================================================');
-  console.log('🧪 SAHAARA Twilio WhatsApp SOS: Automated Verification Suite');
+  console.log('🧪 SAHAARA Twilio WhatsApp SOS: Automated Verification & Regression Suite');
   console.log('================================================================\n');
 
-  // Test 1: One guardian receives an API submission
-  await runTest('1. One guardian receives an API submission', async () => {
+  // Test 1: One guardian receives an API submission in production mode
+  await runTest('1. One guardian receives an API submission (production mode)', async () => {
     const mockClient = createMockTwilioClient({ sid: 'SM_test_single', initialStatus: 'queued' });
     const res = await sendTwilioWhatsAppMessage({
       toPhone: '9876543210',
@@ -147,6 +156,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -158,8 +168,8 @@ async function runAllTests() {
     assert.strictEqual(mockClient.calls[0].contentSid, 'HX_valid_sos_template_123');
   });
 
-  // Test 2: Multiple guardians are processed
-  await runTest('2. Multiple guardians are processed', async () => {
+  // Test 2: Multiple guardians are processed in production mode
+  await runTest('2. Multiple guardians are processed (production mode)', async () => {
     let callIdx = 0;
     const mockClient = createMockTwilioClient({
       customBehavior: (params) => ({
@@ -185,7 +195,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
-        mode: 'sandbox',
+        mode: 'production',
       },
     });
 
@@ -196,19 +206,16 @@ async function runAllTests() {
     assert.strictEqual(res.results.length, 3);
   });
 
-  // Test 3: Sandbox sending respects the three-second interval
-  await runTest('3. Sandbox sending respects the three-second interval', async () => {
-    const sleepDelays = [];
+  // Test 3: Sandbox mode blocks actual SOS dispatch upfront
+  await runTest('3. Sandbox mode blocks actual SOS dispatch upfront', async () => {
     const mockClient = createMockTwilioClient();
-
-    await sendSosAlertsToGuardians({
+    const res = await sendSosAlertsToGuardians({
       guardians: [
         { name: 'G1', phone: '9876543210' },
         { name: 'G2', phone: '9876543211' },
       ],
       contentSid: 'HX_valid_sos_template_123',
       client: mockClient,
-      sleepFn: (ms) => sleepDelays.push(ms),
       configOverrides: {
         accountSid: 'AC_mock',
         apiKey: 'SK_mock',
@@ -219,11 +226,15 @@ async function runAllTests() {
       },
     });
 
-    assert.strictEqual(sleepDelays.length, 1, 'Should sleep between 2 recipients');
-    assert.strictEqual(sleepDelays[0], 3000, 'Sandbox mode interval must be at least 3000ms');
+    assert.strictEqual(res.ok, false, 'Must not report ok in Sandbox mode');
+    assert.strictEqual(res.overallStatus, 'FAILED');
+    assert.strictEqual(res.code, 'SANDBOX_MODE_RESTRICTION');
+    assert.strictEqual(res.acceptedCount, 0, 'No guardian should be accepted in Sandbox mode');
+    assert.strictEqual(mockClient.calls.length, 0, 'Zero Twilio messages should be sent');
+    assert.ok(res.error.includes('Sandbox'));
   });
 
-  // Test 4: An unjoined Sandbox recipient produces a clear failure
+  // Test 4: An unjoined Sandbox recipient produces a clear failure in production/trial
   await runTest('4. An unjoined Sandbox recipient produces a clear failure', async () => {
     const mockClient = createMockTwilioClient({
       shouldThrow: true,
@@ -241,6 +252,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -253,7 +265,7 @@ async function runAllTests() {
     );
   });
 
-  // Test 5: One recipient failure does not stop other recipients
+  // Test 5: One recipient failure does not stop other recipients in production mode
   await runTest('5. One recipient failure does not stop other recipients', async () => {
     let callCount = 0;
     const mockClient = createMockTwilioClient({
@@ -282,6 +294,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -306,6 +319,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -320,7 +334,7 @@ async function runAllTests() {
       toPhone: '9876543210',
       contentSid: 'HX_valid_sos_template_123',
       configOverrides: {
-        accountSid: '', // missing
+        accountSid: '', // explicitly missing
         apiKey: '',
       },
     });
@@ -329,8 +343,8 @@ async function runAllTests() {
     assert.strictEqual(res.code, 'CONFIG_MISSING');
   });
 
-  // Test 8: Content SID is supplied correctly
-  await runTest('8. Content SID is supplied correctly', async () => {
+  // Test 8: Content SID is supplied correctly in production mode
+  await runTest('8. Content SID is supplied correctly in production mode', async () => {
     const mockClient = createMockTwilioClient();
     await sendTwilioWhatsAppMessage({
       toPhone: '9876543210',
@@ -342,6 +356,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -364,6 +379,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
     assert.strictEqual(mockClient1.calls[0].contentVariables, undefined, 'Must not supply contentVariables for static template');
@@ -381,6 +397,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
     assert.strictEqual(
@@ -408,6 +425,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -432,6 +450,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -526,7 +545,7 @@ async function runAllTests() {
     assert.strictEqual(res2.status, 401, 'Request with invalid token must return 401');
   });
 
-  // Setup Global Mock Client for HTTP SOS requests in Tests 16 and 17
+  // Setup Global Mock Client for HTTP endpoints
   const httpGlobalMockClient = createMockTwilioClient({
     customBehavior: (params) => ({
       sid: `SM_http_mock_${Date.now()}`,
@@ -537,7 +556,7 @@ async function runAllTests() {
   setGlobalTwilioClient(httpGlobalMockClient);
 
   // Test 16: Location retrieval failure does not prevent SOS creation
-  await runTest('16. Location retrieval failure does not prevent SOS creation', async () => {
+  await runTest('16. Location retrieval failure does not prevent SOS record creation in Sandbox', async () => {
     const res = await makeRequest(app, {
       method: 'POST',
       path: '/api/sos',
@@ -553,13 +572,14 @@ async function runAllTests() {
       },
     });
 
-    assert.strictEqual(res.status, 200, `Expected 200, got ${res.status}: ${JSON.stringify(res.body)}`);
-    assert.strictEqual(res.body.ok, true);
+    // In sandbox mode: returns 400 with SANDBOX_MODE_RESTRICTION, but location is stored as null and alertId is generated
+    assert.strictEqual(res.status, 400);
+    assert.strictEqual(res.body.code, 'SANDBOX_MODE_RESTRICTION');
     assert.strictEqual(res.body.location, null);
-    assert.strictEqual(res.body.acceptedCount, 1);
+    assert.ok(res.body.alertId, 'Alert ID must be generated to record incident');
   });
 
-  // Test 17: Duplicate SOS requests are blocked
+  // Test 17: Duplicate SOS requests are blocked by rate limiter
   await runTest('17. Duplicate SOS requests are blocked by rate limiter', async () => {
     const headers = {
       Authorization: 'Bearer mock-token-rate-limit-user',
@@ -577,7 +597,7 @@ async function runAllTests() {
         _testMockContacts: [{ name: 'Son', phone: '9876543210' }],
       },
     });
-    assert.strictEqual(res1.status, 200);
+    assert.strictEqual(res1.status, 400); // 400 due to sandbox restriction
 
     // Immediate second request (within 15s cooldown)
     const res2 = await makeRequest(app, {
@@ -606,6 +626,7 @@ async function runAllTests() {
         apiSecret: 'secret_mock',
         authToken: 'token_mock',
         from: 'whatsapp:+17372508034',
+        mode: 'production',
       },
     });
 
@@ -615,6 +636,76 @@ async function runAllTests() {
       res.error.includes('Appointment Reminder template'),
       'Must explain that appointment reminder template cannot represent SOS'
     );
+  });
+
+  // Test 19: REGRESSION - Arbitrary Content SID cannot bypass Sandbox restriction
+  await runTest('19. REGRESSION: Arbitrary Content SID cannot bypass Sandbox restriction', async () => {
+    const mockClient = createMockTwilioClient();
+    const res = await sendTwilioWhatsAppMessage({
+      toPhone: '9876543210',
+      contentSid: 'HX_arbitrary_custom_template_bypass_attempt',
+      client: mockClient,
+      configOverrides: {
+        accountSid: 'AC_mock',
+        apiKey: 'SK_mock',
+        apiSecret: 'secret_mock',
+        authToken: 'token_mock',
+        from: 'whatsapp:+17372508034',
+        mode: 'sandbox', // Sandbox mode active!
+      },
+    });
+
+    assert.strictEqual(res.accepted, false);
+    assert.strictEqual(res.code, 'SANDBOX_MODE_RESTRICTION');
+    assert.strictEqual(mockClient.calls.length, 0, 'No outbound message should be dispatched');
+    assert.ok(res.error.includes('Sandbox mode'));
+  });
+
+  // Test 20: REGRESSION - Dedicated Connectivity Testing verifies Twilio without dispatching SOS
+  await runTest('20. REGRESSION: Connectivity test verifies credentials without dispatching SOS', async () => {
+    const mockClient = createMockTwilioClient();
+    const res = await verifyTwilioConnectivity({
+      client: mockClient,
+      configOverrides: {
+        accountSid: 'AC_mock',
+        apiKey: 'SK_mock',
+        apiSecret: 'secret_mock',
+        authToken: 'token_mock',
+        from: 'whatsapp:+17372508034',
+        mode: 'sandbox',
+      },
+    });
+
+    assert.strictEqual(res.ok, true);
+    assert.strictEqual(res.twilioApiConnected, true, 'Twilio API must be connected');
+    assert.strictEqual(res.sosDispatched, false, 'Must NOT dispatch actual SOS');
+    assert.strictEqual(res.deliveryConfirmed, false, 'Must NOT claim delivery confirmed');
+    assert.strictEqual(mockClient.calls.length, 0, 'Must NOT send any WhatsApp message');
+  });
+
+  // Test 21: REGRESSION - HTTP /api/twilio/test-connectivity endpoint
+  await runTest('21. REGRESSION: HTTP /api/twilio/test-connectivity requires auth and returns status', async () => {
+    // Unauthenticated
+    const resUnauth = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/test-connectivity',
+    });
+    assert.strictEqual(resUnauth.status, 401);
+
+    // Authenticated
+    const resAuth = await makeRequest(app, {
+      method: 'POST',
+      path: '/api/twilio/test-connectivity',
+      headers: {
+        Authorization: 'Bearer mock-token-test-user',
+        'x-test-auth-mock': 'true',
+      },
+    });
+
+    assert.strictEqual(resAuth.status, 200);
+    assert.strictEqual(resAuth.body.twilioApiConnected, true);
+    assert.strictEqual(resAuth.body.sosDispatched, false);
+    assert.strictEqual(resAuth.body.deliveryConfirmed, false);
   });
 
   console.log('\n================================================================');

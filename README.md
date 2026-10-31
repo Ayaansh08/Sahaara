@@ -1,4 +1,4 @@
-# Sahaara
+﻿# Sahaara
 
 Sahaara is a senior-friendly mobile and web app for connection, wellbeing, and preserving memories. It is built with Expo Router and React Native, with Firebase for authentication, Firestore, and photo storage. The Saathi companion uses a small Express backend to call the Groq API without exposing the API key in the client.
 
@@ -257,11 +257,32 @@ This verifies:
 17. Duplicate SOS rate limiting and debounce protection.
 18. Blocking of the default Appointment Reminder Content SID.
 
-#### Manual Sandbox Testing
-1. Ensure the recipient's phone number has joined your Sandbox via WhatsApp (`join <code>`).
-2. Add the guardian's phone number in the SAHAARA app under **More > Emergency Contacts**.
-3. Trigger a test SOS alert by tapping **Send test message** on the contact, or press the main **SOS button** on the home screen.
-4. Verify the recipient receives the alert and that the mobile screen displays **Accepted** status.
+#### Testing Workflow & Sandbox vs Production Distinction
+
+It is critical to distinguish between **automated testing**, **API connectivity verification**, and **actual live SOS WhatsApp delivery**:
+
+1. **Automated Mocked Test Suite (Safe & Cost-Free):**
+   The backend includes an automated test suite verifying all error-handling, rate-limiting, and template-rejection scenarios using mocked Twilio SDK calls:
+   ```bash
+   cd server
+   npm test
+   ```
+   *Zero real WhatsApp messages are dispatched during automated tests.*
+
+2. **Twilio API Connectivity Verification (Sandbox Mode):**
+   - The successful Sandbox test using the pre-approved Appointment Reminder template (`HXfe5ab5f00277942d4d4200328b4d403c`) **verifies Twilio API authentication and account connectivity only**.
+   - It **does not** test actual emergency SOS dispatch.
+   - You can verify backend Twilio credentials safely without creating an emergency alert:
+     - In the SAHAARA app, tap **Send test message** under **More > Emergency Contacts**.
+     - Or send an authenticated request to `POST /api/twilio/test-connectivity`.
+     - The backend verifies Twilio API credentials and confirms connectivity without sending false emergency messages.
+
+3. **Actual SOS WhatsApp Delivery (Requires Production Mode):**
+   - **Twilio Sandbox CANNOT dispatch live SAHAARA SOS emergency alerts.** Twilio Sandbox strictly restricts messaging to pre-approved system templates (e.g., appointment reminders), and custom templates are prohibited in the Sandbox.
+   - The app **strictly blocks** dispatching the Appointment Reminder template (`HXfe5ab5f00277942d4d4200328b4d403c`) or arbitrary templates in Sandbox mode.
+   - If an elder presses the SOS button while the backend is in Sandbox mode, the backend safely records the alert incident in Firestore, logs the restriction, and returns `SANDBOX_MODE_RESTRICTION`.
+   - The mobile app displays an informative notice explaining that production WhatsApp configuration is required, while keeping the green **Send via WhatsApp yourself** (`wa.me`) fallback button active so the elder can still reach their family immediately.
+   - **Live delivery requirement:** Actual emergency SOS WhatsApp delivery requires upgrading to a production Twilio account (`TWILIO_WHATSAPP_MODE=production`), registering a dedicated WhatsApp Business Profile (WABA) sender, and securing Meta approval for an official emergency alert template.
 
 ---
 
