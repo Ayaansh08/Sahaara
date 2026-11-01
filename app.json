@@ -18,7 +18,12 @@
       "permissions": [
         "RECORD_AUDIO",
         "ACCESS_FINE_LOCATION",
-        "ACCESS_COARSE_LOCATION"
+        "ACCESS_COARSE_LOCATION",
+        "android.permission.health.READ_HEART_RATE",
+        "android.permission.health.READ_OXYGEN_SATURATION",
+        "android.permission.health.READ_BLOOD_PRESSURE",
+        "android.permission.health.READ_RESPIRATORY_RATE",
+        "android.permission.health.READ_RESTING_HEART_RATE"
       ],
       "adaptiveIcon": {
         "backgroundColor": "#F8F0E5",
@@ -31,6 +36,7 @@
     "plugins": [
       "expo-router",
       "expo-audio",
+      "react-native-health-connect",
       [
         "expo-av",
         {
