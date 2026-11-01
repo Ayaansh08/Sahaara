@@ -48,7 +48,9 @@
         {
           "locationWhenInUsePermission": "Sahaara needs your location to send emergency assistance to your family. / आपातकालीन स्थिति में आपके परिवार को आपका स्थान भेजने के लिए स्थान की अनुमति आवश्यक है।"
         }
-      ]
+      ],
+      "expo-font",
+      "expo-asset"
     ]
   }
 }
