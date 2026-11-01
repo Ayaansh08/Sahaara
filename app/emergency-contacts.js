@@ -270,7 +270,7 @@ export default function EmergencyContactsScreen() {
         Authorization: `Bearer ${idToken}`,
       };
 
-      const res = await fetch(`${baseUrl}/api/twilio/test-connectivity`, {
+      const res = await fetch(`${baseUrl}/api/whatsapp/test-connectivity`, {
         method: 'POST',
         headers,
       });

@@ -6,9 +6,10 @@
   "scripts": {
     "start": "node index.js",
     "dev": "node index.js",
-    "test": "node test/twilio_sos.test.js && node test/vitals_sos.test.js",
+    "test": "node test/twilio_sos.test.js && node test/vitals_sos.test.js && node test/whatsgateway_sos.test.js",
     "test:twilio": "node test/twilio_sos.test.js",
-    "test:vitals": "node test/vitals_sos.test.js"
+    "test:vitals": "node test/vitals_sos.test.js",
+    "test:whatsgateway": "node test/whatsgateway_sos.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

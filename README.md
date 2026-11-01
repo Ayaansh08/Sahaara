@@ -450,12 +450,157 @@ The Vitals screen includes an isolated **Hackathon Demo Simulator**:
 
 ### 9. Automated Verification Suite
 
-The backend includes a comprehensive 58-test automated suite covering Twilio WhatsApp SOS (38 tests) and Health Connect vitals emergency orchestration (20 tests):
+The backend includes a comprehensive 80-test automated verification suite covering:
+- Twilio WhatsApp SOS Integration (38 tests)
+- Health Connect Vitals Emergency Orchestration (20 tests)
+- WhatsGateway Self-Hosted WhatsApp REST API Integration (22 tests)
 
 ```bash
-# Run entire test suite (58 passed, 0 failed)
+# Run entire test suite (80 passed, 0 failed)
 npm --prefix server test
+
+# Run WhatsGateway test suite only (22 passed, 0 failed)
+npm --prefix server run test:whatsgateway
 
 # Run vitals & smartwatch emergency suite only (20 passed, 0 failed)
 npm --prefix server run test:vitals
+
+# Run Twilio WhatsApp suite only (38 passed, 0 failed)
+npm --prefix server run test:twilio
 ```
+
+---
+
+## WhatsGateway Self-Hosted WhatsApp Integration
+
+SAHAARA supports self-hosted WhatsApp delivery via **WhatsGateway** ([navneetyadav-code/whatsapp-api](https://github.com/navneetyadav-code/whatsapp-api)), an independent, open-source REST API gateway powered by **PHP 8.2**, **Node.js (@whiskeysockets/baileys)**, and **MySQL 8.0**.
+
+WhatsGateway runs as an isolated microservice on the host machine or in a separate container network, providing free, template-free WhatsApp messaging without third-party SaaS fees.
+
+### 1. WhatsGateway Docker Installation
+
+Run WhatsGateway as an independent service on the development host (e.g. via Docker Desktop for Windows):
+
+```bash
+# 1. Clone WhatsGateway into an independent directory outside SAHAARA
+git clone https://github.com/navneetyadav-code/whatsapp-api.git
+cd whatsapp-api
+
+# 2. Launch multi-container stack (Apache PHP 8.2, Node.js 20 Baileys worker, MySQL 8.0)
+docker compose up -d
+
+# 3. Verify services are running
+docker compose ps
+```
+
+The gateway dashboard will be accessible at `http://localhost:8080`.
+
+> **IMPORTANT Architectural Boundary:** Do NOT clone, merge, or copy WhatsGateway PHP/MySQL code into the SAHAARA repository. It operates strictly as an external HTTP microservice.
+
+### 2. Required Backend Environment Variables
+
+In `server/.env`:
+
+```env
+# Active provider selector ('whatsgateway' or 'twilio')
+WHATSAPP_PROVIDER=whatsgateway
+
+# WhatsGateway endpoint on local host
+WHATSAPP_GATEWAY_URL=http://127.0.0.1:8080
+
+# API key generated in WhatsGateway Dashboard (/api-keys)
+WHATSAPP_GATEWAY_API_KEY=your_whatsgateway_api_key_here
+
+# Outbound timeout in milliseconds (default: 15000)
+WHATSAPP_GATEWAY_TIMEOUT_MS=15000
+
+# Webhook HMAC-SHA256 signature secret configured in Dashboard (/webhooks)
+WHATSAPP_GATEWAY_WEBHOOK_SECRET=your_whatsgateway_webhook_secret_here
+
+# Optional public HTTPS status callback URL (for message.sent callbacks)
+WHATSAPP_GATEWAY_STATUS_CALLBACK_URL=
+```
+
+> **Container / Remote Deployment Note:** If the Express backend is later containerized or deployed to a remote server, `127.0.0.1:8080` will no longer point to the host. Use the Docker bridge network DNS (e.g. `http://whatsgateway:80`) or your private internal network hostname. Never expose the Gateway API key to mobile clients or public repository files.
+
+### 3. Dashboard Access & Account Setup
+
+1. Open `http://localhost:8080` in your browser.
+2. Sign in with the administrator credentials configured in `INITIAL_ADMIN_EMAIL` and `INITIAL_ADMIN_PASSWORD` (or your local database seed).
+
+### 4. API Key Creation
+
+1. In the WhatsGateway dashboard, navigate to **API Keys** (`/api-keys`).
+2. Click **Generate New Key**.
+3. Copy the live API key (`wa_live_...`).
+4. Paste the key into `server/.env` as `WHATSAPP_GATEWAY_API_KEY`.
+5. Note: Plaintext API keys are never stored on the gateway; only SHA-256 hashes are persisted.
+
+### 5. WhatsApp Device Pairing
+
+1. In the WhatsGateway dashboard, navigate to **Device** (`/device`) and click **Connect**.
+2. Open **WhatsApp** on your mobile device (personal or WhatsApp Business).
+3. Navigate to **Linked Devices > Link a Device**.
+4. Scan the QR code displayed on the screen.
+5. Once the session state transitions to `connected`, the gateway is ready to dispatch alerts.
+
+### 6. Health Probe Endpoint
+
+Verify gateway readiness without authentication:
+
+```bash
+curl http://localhost:8080/api/health.php
+```
+
+Expected response (`200 OK`):
+```json
+{
+  "ok": true,
+  "status": "healthy",
+  "database": { "ok": true, "connected": true, "schema_ready": true },
+  "worker": { "ok": true, "status_code": 200, "service": "whatsapp-worker" }
+}
+```
+
+The SAHAARA backend exposes an authenticated connectivity endpoint at `POST /api/whatsapp/test-connectivity` (and backward-compatible alias `/api/twilio/test-connectivity`) which verifies this health probe before initiating live alerts.
+
+### 7. Test Message Procedure
+
+Before testing real emergency triggers:
+1. In the SAHAARA app, navigate to **More > Emergency Contacts**.
+2. Tap the test connectivity icon or button.
+3. The app executes an authenticated check verifying API reachability, MySQL health, and Node.js Baileys worker connectivity without dispatching an actual SOS message.
+
+### 8. Recipient Phone Number Requirements
+
+- Destination numbers are normalized by the backend into international format **without** `+` or `whatsapp:` prefix (e.g. `919876543210`).
+- Valid international country codes are preserved (e.g. `15551234567` for US, `447123456789` for UK).
+- 10-digit Indian numbers are automatically prepended with `91`.
+- Numbers shorter than 10 digits or containing invalid characters are rejected with `INVALID_PHONE_NUMBER`.
+- Emergency recipients are **strictly** retrieved from the authenticated user's Firestore path (`users/{uid}/emergencyContacts`). Client requests can never inject or override recipients.
+
+### 9. Delivery Semantics: Queued vs Sent vs Delivered
+
+It is critical to distinguish message states in WhatsGateway:
+1. **`ACCEPTED_BY_GATEWAY` (`status: "queued"` from REST API):** The message has been validated and placed into the MySQL FIFO queue. It has **NOT** been transmitted to WhatsApp yet. The UI shows `Accepted (Queued)`, never `Delivered`.
+2. **`SENT` (`message.sent` webhook event):** The Node.js Baileys worker claimed the message and dispatched it across the Noise protocol WebSocket to WhatsApp servers.
+3. **`DELIVERED`:** Unofficial Baileys multi-device emulation does not guarantee receipt delivery confirmations. Therefore, SAHAARA marks messages as `SENT` upon worker dispatch, and never claims `DELIVERED` without verified evidence.
+4. **`FAILED` (`message.failed` webhook event):** The worker failed to deliver the message (e.g. device disconnected, recipient not on WhatsApp, or socket timeout).
+
+### 10. Troubleshooting Device Disconnections
+
+| Symptom | Cause | Solution |
+|---|---|---|
+| `409 Conflict: Device Not Connected` | The paired phone lost internet or WhatsApp logged out the session. | Open `/device` in the dashboard, click Reconnect, and re-scan the QR code. |
+| `502 Bad Gateway: Worker Unreachable` | The background Node.js worker microservice crashed or stopped. | In Docker: `docker compose restart worker`. On Windows host: run `start-worker.bat restart`. |
+| `503 Service Degraded` | Database connection lost or schema unready. | Run database migrations via `php scripts/migrate.php` and verify MySQL port. |
+| `GATEWAY_TIMEOUT` | Gateway queue is saturated or worker is busy. | Backend times out safely after 15s. Zero silent retries are attempted to avoid duplicate emergency alerts. |
+
+### 11. Unofficial Baileys Integration Limitations & Hackathon Scope
+
+⚠️ **Critical Operational Disclaimers:**
+- **Unofficial Reverse-Engineered Protocol:** WhatsGateway connects using [WhiskeySockets/Baileys](https://github.com/WhiskeySockets/Baileys), which emulates the WhatsApp Web multi-device protocol. Meta does not officially sponsor or guarantee multi-device web client stability.
+- **Phone Must Remain Active:** The paired phone must maintain an active WhatsApp installation. If WhatsApp revokes the linked session, automated alerts will fail until re-linked.
+- **Not a Certified Life-Safety System:** This integration is engineered for **hackathon demonstrations and local development**. It must never be relied upon as a primary substitute for official emergency response services (112 / 911).
+- **Manual WhatsApp Fallback Preserved:** If WhatsGateway is disconnected or offline, the SAHAARA app preserves the green manual WhatsApp fallback button, opening direct pre-filled `wa.me` links so seniors can always contact guardians manually.
+

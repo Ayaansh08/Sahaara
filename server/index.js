@@ -34,7 +34,11 @@ const WHATSAPP_TEMPLATE_NAME = process.env.WHATSAPP_TEMPLATE_NAME || 'sahaara_em
 const WHATSAPP_TEMPLATE_LANG = process.env.WHATSAPP_TEMPLATE_LANG || 'en_US';
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  },
+}));
 app.use(express.urlencoded({ extended: false }));
 
 const {
@@ -47,6 +51,14 @@ const {
   buildSosContentVariables,
   validateContentVariables,
 } = require('./services/twilioService');
+
+const {
+  getWhatsGatewayConfig,
+  sendSosAlertsToGuardiansGateway,
+  checkWhatsGatewayHealth,
+  validateGatewayWebhookSignature,
+  processGatewayCallback,
+} = require('./services/whatsGatewayService');
 
 const {
   getFirestoreDb,
@@ -492,12 +504,13 @@ app.post('/api/twilio/status-callback', async (req, res) => {
   }
 });
 
-// --- Dedicated Twilio Connectivity Verification -------------------------------
+// --- Authenticated WhatsApp Connectivity Verification -------------------------------
 /**
- * Verifies Twilio API credentials and connectivity without sending any messages,
+ * Verifies WhatsApp API credentials and connectivity without sending any messages,
  * creating SOS records, or falsely confirming delivery.
+ * Supports both WhatsGateway (default) and Twilio based on WHATSAPP_PROVIDER.
  */
-app.post('/api/twilio/test-connectivity', async (req, res) => {
+async function handleTestConnectivity(req, res) {
   try {
     const user = await verifyFirebaseUser(req);
     if (!user) {
@@ -511,36 +524,122 @@ app.post('/api/twilio/test-connectivity', async (req, res) => {
       });
     }
 
-    const result = await verifyTwilioConnectivity();
-    return res.status(result.ok ? 200 : 503).json(result);
+    const activeProvider = (process.env.WHATSAPP_PROVIDER || 'whatsgateway').toLowerCase();
+    if (activeProvider === 'whatsgateway') {
+      const result = await checkWhatsGatewayHealth();
+      return res.status(result.ok ? 200 : 503).json(result);
+    } else {
+      const result = await verifyTwilioConnectivity();
+      return res.status(result.ok ? 200 : 503).json(result);
+    }
   } catch (err) {
     console.error('Error in test-connectivity:', err);
     return res.status(500).json({ ok: false, error: 'Internal server error testing connectivity' });
   }
+}
+
+app.post('/api/whatsapp/test-connectivity', handleTestConnectivity);
+app.post('/api/twilio/test-connectivity', handleTestConnectivity);
+
+// --- WhatsGateway Status Callback Webhook ---------------------------------
+/**
+ * Receives delivery status updates from WhatsGateway for WhatsApp messages.
+ * Requirements:
+ * - Validates X-WA-Hub-Signature using HMAC-SHA256 and configured WHATSAPP_GATEWAY_WEBHOOK_SECRET
+ * - Evaluates against raw request body (req.rawBody)
+ * - Constant-time comparison
+ * - Fails closed if webhook secret is not configured
+ * - Handles duplicate and out-of-order events
+ * - Status 'sent' is mapped to SENT (never DELIVERED without read receipt)
+ */
+app.post('/api/whatsgateway/callback', async (req, res) => {
+  try {
+    const config = getWhatsGatewayConfig();
+
+    // Check test bypass: strictly allowed ONLY when NODE_ENV === 'test' AND header is present
+    const isTestBypassHeader = req.headers['x-test-signature-bypass'] === 'true';
+    if (isTestBypassHeader) {
+      if (process.env.NODE_ENV !== 'test') {
+        console.warn('[WhatsGateway Webhook] Signature bypass attempt rejected outside test environment from:', req.ip);
+        return res.status(403).json({ error: 'Forbidden: Signature bypass is only permitted in test environment' });
+      }
+    } else {
+      // 1. Fail Closed: if WHATSAPP_GATEWAY_WEBHOOK_SECRET is not configured on the server, reject callback
+      if (!config.webhookSecret) {
+        console.error('[WhatsGateway Webhook] WHATSAPP_GATEWAY_WEBHOOK_SECRET is not configured on the server. Rejecting callback (fail closed).');
+        return res.status(500).json({ error: 'Server misconfiguration: WHATSAPP_GATEWAY_WEBHOOK_SECRET is missing. Cannot verify webhook signature.' });
+      }
+
+      // 2. Reject if X-WA-Hub-Signature header is missing
+      const signature = req.headers['x-wa-hub-signature'];
+      if (!signature) {
+        console.warn('[WhatsGateway Webhook] Missing X-WA-Hub-Signature header from:', req.ip);
+        return res.status(403).json({ error: 'Forbidden: Missing X-WA-Hub-Signature header' });
+      }
+
+      // 3. Validate signature against raw request body
+      const rawBody = req.rawBody || JSON.stringify(req.body);
+      const isValid = validateGatewayWebhookSignature(rawBody, signature, config.webhookSecret);
+      if (!isValid) {
+        console.warn('[WhatsGateway Webhook] Invalid X-WA-Hub-Signature from:', req.ip);
+        return res.status(403).json({ error: 'Forbidden: Invalid WhatsGateway signature' });
+      }
+    }
+
+    const {
+      event,
+      message_id,
+      messageId,
+      request_id,
+      requestId,
+      wamid,
+      recipient,
+      to,
+      status,
+      error,
+    } = req.body;
+
+    const firestoreDb = getFirestoreDb();
+    const result = await processGatewayCallback({
+      event,
+      messageId: message_id || messageId,
+      requestId: request_id || requestId,
+      wamid,
+      recipient: recipient || to,
+      status,
+      error,
+      firestoreDb,
+    });
+
+    console.log(`[WhatsGateway Webhook] Callback processed for ${message_id || requestId || 'msg'}: event=${event || 'none'}, status=${status} -> ${result.status}`);
+    return res.status(200).json({ status: 'ok', ...result });
+  } catch (err) {
+    console.error('[WhatsGateway Webhook] Error processing callback:', err);
+    return res.status(500).json({ error: 'Internal server error processing callback' });
+  }
 });
 
-// --- Emergency WhatsApp SOS Endpoint (Twilio WhatsApp) -----------------------
+// --- Emergency WhatsApp SOS Endpoint -----------------------------------------
 /**
- * Triggers an SOS emergency alert via Twilio WhatsApp.
+ * Triggers an SOS emergency alert via active provider (WhatsGateway or Twilio).
  * 
  * Strict Guarantees:
  * 1. Authentication: Rejects unauthorized requests; derives user identity strictly
  *    from verified Firebase ID token.
  * 2. Emergency Contacts: Retrieves user's registered contacts from Firestore;
- *    never accepts arbitrary recipient numbers from the client body.
+ *    never accepts arbitrary recipient numbers or test mocks from the client body.
  * 3. Location: Continues even if location capture fails.
- * 4. Sandbox Restrictions:
- *    - Strictly blocks default Appointment Reminder Content SID (HXfe5ab5f00277942d4d4200328b4d403c).
- *    - Sequential sending with >= 3-second delay in Sandbox mode.
- *    - Handles error 63015 for unjoined Sandbox recipients.
- * 5. Status Tracking: Initial status is QUEUED/SENDING/SENT (never DELIVERED on creation).
- * 6. Alert Logging: Records alert in Firestore and associates message SIDs for webhook reconciliation.
+ * 4. Provider Separation:
+ *    - When WHATSAPP_PROVIDER=whatsgateway, Twilio sandbox restrictions do not apply.
+ *    - When WHATSAPP_PROVIDER=twilio, Twilio sandbox & Content SID rules are enforced.
+ * 5. Status Tracking: Initial status is ACCEPTED_BY_GATEWAY or QUEUED (never DELIVERED).
+ * 6. Alert Logging: Records alert in Firestore and associates IDs for webhook reconciliation.
  */
 app.post('/api/sos', async (req, res) => {
   try {
     const { reason = 'manual', location } = req.body;
 
-    // 'test' is strictly removed; connectivity tests must use POST /api/twilio/test-connectivity
+    // 'test' is strictly removed; connectivity tests must use test-connectivity endpoints
     const allowedReasons = ['manual', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse', 'vitals_critical'];
     if (!reason || !allowedReasons.includes(reason)) {
       return res.status(400).json({ ok: false, error: 'Invalid or missing reason' });
@@ -583,18 +682,8 @@ app.post('/api/sos', async (req, res) => {
     }
     sosRateLimits.set(limitKey, limitRecord);
 
-    // 3. Check Twilio configuration upfront
-    const twilioConfig = getTwilioConfig();
-    if (!twilioConfig.isConfigured) {
-      console.warn('[SOS] Twilio credentials missing in server/.env');
-      return res.status(503).json({
-        ok: false,
-        configured: false,
-        overallStatus: 'FAILED',
-        error: 'Twilio WhatsApp is not configured on the server. Please set TWILIO_ACCOUNT_SID, TWILIO_API_KEY, TWILIO_API_SECRET, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM in server/.env',
-        results: [],
-      });
-    }
+    // 3. Resolve active provider
+    const activeProvider = (process.env.WHATSAPP_PROVIDER || 'whatsgateway').toLowerCase();
 
     // 4. Validate location (lat between -90 and 90, lng between -180 and 180)
     let validLocation = null;
@@ -626,68 +715,6 @@ app.post('/api/sos', async (req, res) => {
         ok: false,
         overallStatus: 'FAILED',
         error: 'No valid emergency contacts configured. Please add emergency contacts in the Sahaara app.',
-        results: [],
-      });
-    }
-
-    // 6. In Sandbox mode: block actual SOS alerts upfront
-    // Arbitrary Content SIDs cannot bypass this restriction
-    if (twilioConfig.isSandbox) {
-      console.warn('[SOS] Refusing live SOS dispatch in Sandbox mode for ' + user.name + ' (' + user.uid + ').');
-      
-      const firestoreDb = getFirestoreDb();
-      const alertId = await recordSosAlert({
-        userId: user.uid,
-        userEmail: user.email,
-        userName: user.name,
-        location: validLocation,
-        status: 'FAILED',
-        overallStatus: 'FAILED',
-        results: [],
-        contacts,
-        reason,
-        provider: 'twilio_whatsapp',
-        token: user.token,
-        firestoreDb,
-      });
-
-      return res.status(400).json({
-        ok: false,
-        overallStatus: 'FAILED',
-        code: 'SANDBOX_MODE_RESTRICTION',
-        error: 'Twilio WhatsApp is operating in Sandbox mode. The Sandbox does not support custom emergency templates and cannot dispatch SAHAARA SOS alerts. Live SOS dispatch requires a production Twilio WhatsApp sender (TWILIO_WHATSAPP_MODE=production) with an approved Meta emergency template.',
-        mode: 'sandbox',
-        sosDispatched: false,
-        results: [],
-        location: validLocation,
-        alertId,
-        provider: 'twilio_whatsapp',
-      });
-    }
-
-    // 7. Strict Server Control: Content SID is determined exclusively by server configuration.
-    // Client-supplied contentSid or contentVariables in req.body are strictly ignored.
-    const serverContentSid = (twilioConfig.contentSid || '').trim();
-    if (!serverContentSid) {
-      console.warn('[SOS] TWILIO_WHATSAPP_CONTENT_SID is missing in server environment');
-      return res.status(503).json({
-        ok: false,
-        configured: false,
-        overallStatus: 'FAILED',
-        error: 'TWILIO_WHATSAPP_CONTENT_SID is missing in server configuration. Twilio WhatsApp requires an approved Content SID.',
-        results: [],
-      });
-    }
-
-    // RESTRICTION: Block Appointment Reminder Content SID from SAHAARA SOS
-    if (isAppointmentReminderContentSid(serverContentSid)) {
-      console.warn(`[SOS] Refusing to send Appointment Reminder template (${serverContentSid}) for SOS alert.`);
-      return res.status(400).json({
-        ok: false,
-        configured: false,
-        overallStatus: 'FAILED',
-        code: 'APPOINTMENT_REMINDER_BLOCKED',
-        error: `Configured Content SID (${serverContentSid}) is an Appointment Reminder template ("Reminder: Appt Tue Oct 29..."). It cannot represent a SAHAARA SOS emergency notification. Twilio Sandbox does not support custom emergency templates; an approved production SOS Content SID is required.`,
         results: [],
       });
     }
@@ -738,6 +765,156 @@ app.post('/api/sos', async (req, res) => {
         break;
     }
 
+    const firestoreDb = getFirestoreDb();
+
+    // =========================================================================
+    // BRANCH A: WhatsGateway Self-Hosted WhatsApp Provider (Active Default)
+    // =========================================================================
+    if (activeProvider === 'whatsgateway') {
+      const gatewayConfig = getWhatsGatewayConfig();
+      if (!gatewayConfig.apiKey) {
+        console.warn('[SOS WhatsGateway] WHATSAPP_GATEWAY_API_KEY is missing in server environment');
+        return res.status(503).json({
+          ok: false,
+          configured: false,
+          overallStatus: 'FAILED',
+          error: 'WhatsGateway is not configured on the server. Please set WHATSAPP_GATEWAY_API_KEY in server/.env',
+          results: [],
+          provider: 'whatsgateway',
+        });
+      }
+
+      console.log(`[SOS WhatsGateway] Processing SOS alert (${reason}) for ${user.name} (${user.uid}) to ${contacts.length} guardian(s).`);
+
+      // Pre-create SOS record in Firestore
+      const alertId = await createInitialSosAlertRecord({
+        userId: user.uid,
+        userEmail: user.email,
+        userName: user.name,
+        location: validLocation,
+        reason,
+        contacts,
+        provider: 'whatsgateway',
+        token: user.token,
+        firestoreDb,
+      });
+
+      // Send to all guardians via WhatsGateway
+      const sendResult = await sendSosAlertsToGuardiansGateway({
+        guardians: contacts,
+        userName: user.name,
+        emergencyMessage,
+        locationSummary,
+        mapsLink: mapsUrl,
+        timeString: `${istTime} IST`,
+        userId: user.uid,
+        alertId,
+        firestoreDb,
+        config: gatewayConfig,
+      });
+
+      // Update Firestore record
+      await updateSosAlertRecord({
+        alertId,
+        status: sendResult.overallStatus,
+        overallStatus: sendResult.overallStatus,
+        results: sendResult.results,
+        token: user.token,
+        firestoreDb,
+      });
+
+      return res.json({
+        ok: sendResult.ok,
+        overallStatus: sendResult.overallStatus,
+        acceptedAll: sendResult.acceptedAll,
+        acceptedCount: sendResult.acceptedCount,
+        totalContacts: sendResult.totalContacts,
+        results: sendResult.results,
+        location: validLocation,
+        alertId,
+        provider: 'whatsgateway',
+        deliveryCallbacksEnabled: sendResult.deliveryCallbacksEnabled,
+        statusCallbackUrl: sendResult.statusCallbackUrl,
+      });
+    }
+
+    // =========================================================================
+    // BRANCH B: Twilio WhatsApp Provider (Preserved & Configurable)
+    // =========================================================================
+    const twilioConfig = getTwilioConfig();
+    if (!twilioConfig.isConfigured) {
+      console.warn('[SOS Twilio] Twilio credentials missing in server/.env');
+      return res.status(503).json({
+        ok: false,
+        configured: false,
+        overallStatus: 'FAILED',
+        error: 'Twilio WhatsApp is not configured on the server. Please set TWILIO_ACCOUNT_SID, TWILIO_API_KEY, TWILIO_API_SECRET, TWILIO_AUTH_TOKEN, TWILIO_WHATSAPP_FROM in server/.env',
+        results: [],
+        provider: 'twilio_whatsapp',
+      });
+    }
+
+    // In Sandbox mode: block actual SOS alerts upfront
+    if (twilioConfig.isSandbox) {
+      console.warn('[SOS Twilio] Refusing live SOS dispatch in Sandbox mode for ' + user.name + ' (' + user.uid + ').');
+      
+      const alertId = await recordSosAlert({
+        userId: user.uid,
+        userEmail: user.email,
+        userName: user.name,
+        location: validLocation,
+        status: 'FAILED',
+        overallStatus: 'FAILED',
+        results: [],
+        contacts,
+        reason,
+        provider: 'twilio_whatsapp',
+        token: user.token,
+        firestoreDb,
+      });
+
+      return res.status(400).json({
+        ok: false,
+        overallStatus: 'FAILED',
+        code: 'SANDBOX_MODE_RESTRICTION',
+        error: 'Twilio WhatsApp is operating in Sandbox mode. The Sandbox does not support custom emergency templates and cannot dispatch SAHAARA SOS alerts. Live SOS dispatch requires a production Twilio WhatsApp sender (TWILIO_WHATSAPP_MODE=production) with an approved Meta emergency template.',
+        mode: 'sandbox',
+        sosDispatched: false,
+        results: [],
+        location: validLocation,
+        alertId,
+        provider: 'twilio_whatsapp',
+      });
+    }
+
+    // Strict Server Control: Content SID is determined exclusively by server configuration.
+    const serverContentSid = (twilioConfig.contentSid || '').trim();
+    if (!serverContentSid) {
+      console.warn('[SOS Twilio] TWILIO_WHATSAPP_CONTENT_SID is missing in server environment');
+      return res.status(503).json({
+        ok: false,
+        configured: false,
+        overallStatus: 'FAILED',
+        error: 'TWILIO_WHATSAPP_CONTENT_SID is missing in server configuration. Twilio WhatsApp requires an approved Content SID.',
+        results: [],
+        provider: 'twilio_whatsapp',
+      });
+    }
+
+    // RESTRICTION: Block Appointment Reminder Content SID from SAHAARA SOS
+    if (isAppointmentReminderContentSid(serverContentSid)) {
+      console.warn(`[SOS Twilio] Refusing to send Appointment Reminder template (${serverContentSid}) for SOS alert.`);
+      return res.status(400).json({
+        ok: false,
+        configured: false,
+        overallStatus: 'FAILED',
+        code: 'APPOINTMENT_REMINDER_BLOCKED',
+        error: `Configured Content SID (${serverContentSid}) is an Appointment Reminder template ("Reminder: Appt Tue Oct 29..."). It cannot represent a SAHAARA SOS emergency notification. Twilio Sandbox does not support custom emergency templates; an approved production SOS Content SID is required.`,
+        results: [],
+        provider: 'twilio_whatsapp',
+      });
+    }
+
     // Construct server-controlled ContentVariables
     const contentVariables = buildSosContentVariables({
       userName: user.name,
@@ -749,9 +926,7 @@ app.post('/api/sos', async (req, res) => {
 
     console.log(`[SOS Twilio] Processing SOS alert (${reason}) for ${user.name} (${user.uid}) to ${contacts.length} guardian(s) [Mode: ${twilioConfig.mode}].`);
 
-    const firestoreDb = getFirestoreDb();
-
-    // 8. Pre-create SOS record in Firestore before sending to get durable alertId
+    // Pre-create SOS record in Firestore before sending
     const alertId = await createInitialSosAlertRecord({
       userId: user.uid,
       userEmail: user.email,
@@ -764,7 +939,7 @@ app.post('/api/sos', async (req, res) => {
       firestoreDb,
     });
 
-    // 9. Send alerts sequentially to guardians
+    // Send alerts sequentially to guardians
     const sendResult = await sendSosAlertsToGuardians({
       guardians: contacts,
       userName: user.name,
@@ -779,7 +954,7 @@ app.post('/api/sos', async (req, res) => {
       firestoreDb,
     });
 
-    // 10. Update alert in Firestore with dispatch results
+    // Update alert in Firestore with dispatch results
     await updateSosAlertRecord({
       alertId,
       status: sendResult.overallStatus,
@@ -791,7 +966,7 @@ app.post('/api/sos', async (req, res) => {
 
     return res.json({
       ok: sendResult.ok,
-      overallStatus: sendResult.overallStatus, // 'ACCEPTED_ALL' | 'PARTIALLY_ACCEPTED' | 'FAILED'
+      overallStatus: sendResult.overallStatus,
       acceptedAll: sendResult.acceptedAll,
       acceptedCount: sendResult.acceptedCount,
       totalContacts: sendResult.totalContacts,
@@ -804,7 +979,7 @@ app.post('/api/sos', async (req, res) => {
       statusCallbackUrl: sendResult.statusCallbackUrl,
     });
   } catch (error) {
-    console.error('[SOS Twilio] Fatal error:', error);
+    console.error('[SOS] Fatal error:', error);
     return res.status(500).json({
       ok: false,
       overallStatus: 'FAILED',
@@ -816,11 +991,22 @@ app.post('/api/sos', async (req, res) => {
 
 // --- Healthcheck Endpoint ---------------------------------------------------
 app.get('/health', (req, res) => {
+  const activeProvider = (process.env.WHATSAPP_PROVIDER || 'whatsgateway').toLowerCase();
   const twilioCfg = getTwilioConfig();
+  const gatewayCfg = getWhatsGatewayConfig();
+
   res.json({
     status: 'ok',
     service: 'Sahaara SAATHI & SOS Backend',
     model: GROQ_MODEL,
+    activeProvider,
+    whatsgateway: {
+      configured: gatewayCfg.isConfigured,
+      url: gatewayCfg.url,
+      timeoutMs: gatewayCfg.timeoutMs,
+      callbacksEnabled: Boolean(gatewayCfg.statusCallbackUrl && gatewayCfg.webhookSecret),
+      statusCallbackUrl: gatewayCfg.statusCallbackUrl || null,
+    },
     twilio: {
       configured: twilioCfg.isConfigured,
       mode: twilioCfg.mode,
@@ -841,18 +1027,24 @@ if (require.main === module) {
       console.error('Failed to start server:', err);
       process.exit(1);
     }
+    const activeProvider = (process.env.WHATSAPP_PROVIDER || 'whatsgateway').toLowerCase();
+    const gatewayCfg = getWhatsGatewayConfig();
     const twilioCfg = getTwilioConfig();
+
     console.log('====================================================');
-    console.log(`?? Sahaara Server running on http://${HOST}:${PORT}`);
-    console.log(`?? Model: ${GROQ_MODEL}`);
-    console.log(`?? Twilio WhatsApp: ${twilioCfg.isConfigured ? 'Configured ?' : 'Incomplete ??'}`);
-    console.log(`??? Mode: ${twilioCfg.mode.toUpperCase()}`);
-    console.log(`?? From: ${twilioCfg.from}`);
-    console.log(`?? Content SID: ${twilioCfg.contentSid || 'None'}`);
-    if (isAppointmentReminderContentSid(twilioCfg.contentSid)) {
-      console.log(`?? Content SID is Twilio Sandbox Appointment Reminder (Blocked for SOS alerts)`);
+    console.log(`📡 Sahaara Server running on http://${HOST}:${PORT}`);
+    console.log(`🤖 Model: ${GROQ_MODEL}`);
+    console.log(`🔌 Active WhatsApp Provider: ${activeProvider.toUpperCase()}`);
+    if (activeProvider === 'whatsgateway') {
+      console.log(`🌐 WhatsGateway URL: ${gatewayCfg.url}`);
+      console.log(`🔑 WhatsGateway API Key: ${gatewayCfg.apiKey ? 'Configured ✅' : 'Missing ⚠️'}`);
+      console.log(`🔔 Callbacks: ${gatewayCfg.statusCallbackUrl ? gatewayCfg.statusCallbackUrl : 'Disabled'}`);
+    } else {
+      console.log(`💬 Twilio WhatsApp: ${twilioCfg.isConfigured ? 'Configured ✅' : 'Incomplete ⚠️'}`);
+      console.log(`🚦 Twilio Mode: ${twilioCfg.mode.toUpperCase()}`);
+      console.log(`📞 From: ${twilioCfg.from}`);
+      console.log(`📋 Content SID: ${twilioCfg.contentSid || 'None'}`);
     }
-    console.log(`?? Callbacks: ${twilioCfg.statusCallbackUrl ? twilioCfg.statusCallbackUrl : 'Disabled (set TWILIO_STATUS_CALLBACK_URL)'}`);
     console.log('====================================================');
   });
 }

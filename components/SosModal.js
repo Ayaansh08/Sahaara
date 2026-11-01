@@ -50,8 +50,23 @@ export default function SosModal({ visible, onClose }) {
   const [resultState, setResultState] = useState(null); // 'success' | 'failure'
   const [sosResult, setSosResult] = useState(null);
   const isSandboxBlocked = Boolean(
-    sosResult?.code === 'SANDBOX_MODE_RESTRICTION' ||
-    (sosResult?.error && String(sosResult.error).includes('Sandbox mode'))
+    sosResult?.provider === 'twilio_whatsapp' &&
+    (sosResult?.code === 'SANDBOX_MODE_RESTRICTION' ||
+    (sosResult?.error && String(sosResult.error).includes('Sandbox mode')))
+  );
+  const isGatewayError = Boolean(
+    sosResult?.provider === 'whatsgateway' &&
+    (sosResult?.code === 'GATEWAY_DEVICE_DISCONNECTED' ||
+      sosResult?.code === 'GATEWAY_WORKER_UNREACHABLE' ||
+      sosResult?.code === 'GATEWAY_API_KEY_MISSING' ||
+      sosResult?.code === 'GATEWAY_TIMEOUT' ||
+      sosResult?.code === 'GATEWAY_NETWORK_ERROR' ||
+      sosResult?.code === 'GATEWAY_DEGRADED' ||
+      (sosResult?.error && (
+        String(sosResult.error).toLowerCase().includes('whatsgateway') ||
+        String(sosResult.error).toLowerCase().includes('device not connected') ||
+        String(sosResult.error).toLowerCase().includes('worker unreachable')
+      )))
   );
   const isAuthError = Boolean(
     sosResult?.authError === true ||
@@ -176,7 +191,7 @@ export default function SosModal({ visible, onClose }) {
             message: 'Manual SOS alert triggered via Sahaara app',
             timestamp: serverTimestamp(),
             contacts: contacts.map((c) => c.name),
-            provider: result.provider || 'twilio_whatsapp',
+            provider: result.provider || 'whatsgateway',
           });
         }
       } catch (fbErr) {
@@ -405,17 +420,17 @@ export default function SosModal({ visible, onClose }) {
               <Text style={[textStyle('body', lang, colors.inkSoft), styles.subText]}>
                 {sosResult?.overallStatus === 'PARTIALLY_ACCEPTED'
                   ? (isHindi
-                      ? 'व्हाट्सएप ने कुछ संपर्कों के लिए अलर्ट स्वीकार किया है, लेकिन कुछ विफल रहे।'
-                      : 'WhatsApp accepted the alert for some contacts, but some requests failed.')
+                      ? 'व्हाट्सएप गेटवे ने कुछ संपर्कों के लिए अलर्ट कतार में स्वीकार किया, लेकिन कुछ विफल रहे।'
+                      : 'WhatsApp Gateway accepted the alert for some contacts, but some requests failed.')
                   : (isHindi
-                      ? 'व्हाट्सएप ने आपके सभी संपर्कों के लिए आपातकालीन संदेश स्वीकार कर लिया है।'
-                      : 'WhatsApp has accepted the alert request for all your registered contacts.')}
+                      ? 'व्हाट्सएप गेटवे ने आपके सभी संपर्कों के लिए आपातकालीन संदेश कतार में स्वीकार कर लिया है।'
+                      : 'WhatsApp Gateway has accepted and queued the alert for all your registered contacts.')}
               </Text>
 
               {/* Reached / Accepted contacts */}
               <View style={styles.reachedBox}>
                 <Text style={[textStyle('label', lang, colors.calm), { fontFamily: fonts.bodyStrong }]}>
-                  {isHindi ? 'संपर्क स्थिति (मेटा एपीआई):' : 'Contact Status (WhatsApp):'}
+                  {isHindi ? 'संपर्क स्थिति (WhatsApp Gateway):' : 'Contact Status (WhatsApp Gateway):'}
                 </Text>
                 <Text style={[textStyle('body', lang, colors.ink), { marginTop: 4 }]}>
                   {contacts.map((c) => {
@@ -424,7 +439,7 @@ export default function SosModal({ visible, onClose }) {
                     );
                     const isAccepted = match?.accepted;
                     const statusTag = isAccepted
-                      ? (isHindi ? '✓ स्वीकृत' : '✓ Accepted')
+                      ? (isHindi ? '✓ स्वीकृत (कतारबद्ध)' : '✓ Accepted (Queued)')
                       : (isHindi ? '✗ विफल' : '✗ Failed');
                     return `• ${c.name} (${c.relation || 'Contact'}) — ${statusTag}`;
                   }).join('\n')}
@@ -486,6 +501,8 @@ export default function SosModal({ visible, onClose }) {
                   ? (isHindi ? 'सत्र सत्यापन विफल' : 'Authentication Required')
                   : isSandboxBlocked
                   ? (isHindi ? 'Twilio सैंडबॉक्स प्रतिबंध' : 'Twilio Sandbox Active')
+                  : isGatewayError
+                  ? (isHindi ? 'WhatsGateway कनेक्ट नहीं है' : 'WhatsGateway Disconnected')
                   : (isHindi ? 'स्वचालित अलर्ट नहीं भेजा जा सका' : 'Automatic alert failed')}
               </Text>
 
@@ -500,6 +517,10 @@ export default function SosModal({ visible, onClose }) {
                   ? (isHindi
                       ? 'Twilio सैंडबॉक्स मोड में आपातकालीन संदेश नहीं भेजे जा सकते। लाइव आपातकालीन अलर्ट के लिए प्रोडक्शन WhatsApp सेटअप आवश्यक है। कृपया नीचे दिए गए हरे बटन से स्वयं WhatsApp संदेश भेजें।'
                       : 'Twilio Sandbox mode cannot dispatch live emergency alerts. An approved production WhatsApp template is required. Please send manually using the WhatsApp button below.')
+                  : isGatewayError
+                  ? (isHindi
+                      ? 'WhatsGateway सर्वर या WhatsApp डिवाइस कनेक्ट नहीं है। कृपया नीचे दिए गए हरे बटन से स्वयं WhatsApp संदेश भेजें।'
+                      : 'WhatsGateway server or paired WhatsApp device is disconnected or offline. Please send manually using the WhatsApp button below.')
                   : (isHindi
                       ? 'नेटवर्क या सर्वर समस्या के कारण स्वचालित अलर्ट नहीं भेजा जा सका। कृपया नीचे दिए गए WhatsApp बटन से सीधे संदेश भेजें।'
                       : 'Could not send the automatic alert due to a network or server issue. Please send manually using the WhatsApp button below.')}

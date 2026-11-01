@@ -421,7 +421,9 @@ async function runAllVitalsTests() {
   // 19. Sandbox restrictions remain enforced on backend
   await runTest('19. Sandbox restrictions remain enforced on /api/sos for vitals_critical', async () => {
     const origMode = process.env.TWILIO_WHATSAPP_MODE;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
     process.env.TWILIO_WHATSAPP_MODE = 'sandbox';
+    process.env.WHATSAPP_PROVIDER = 'twilio';
 
     const server = http.createServer(app);
     await new Promise((resolve) => server.listen(0, resolve));
@@ -481,6 +483,7 @@ async function runAllVitalsTests() {
       assert.ok(res.body.error.includes('Twilio WhatsApp is operating in Sandbox mode'));
     } finally {
       process.env.TWILIO_WHATSAPP_MODE = origMode;
+      process.env.WHATSAPP_PROVIDER = origProvider;
       setTestMockContactsResolver(null);
       setCustomFirestoreDb(null);
       await new Promise((resolve) => server.close(resolve));

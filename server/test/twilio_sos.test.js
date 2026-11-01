@@ -11,6 +11,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') });
 
 // Enforce test environment
 process.env.NODE_ENV = 'test';
+process.env.WHATSAPP_PROVIDER = 'twilio';
 
 const assert = require('assert');
 const http = require('http');
