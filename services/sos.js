@@ -6,7 +6,7 @@
  */
 
 import * as Location from 'expo-location';
-import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { collection, getDocs, query, orderBy, addDoc, serverTimestamp } from 'firebase/firestore';
 import { onAuthStateChanged } from 'firebase/auth';
 import { auth, db } from '../firebase/config';
 import { getApiBaseUrl } from './saathiService';
@@ -217,6 +217,8 @@ export function buildEmergencyMessage({
     reasonLabel = '🚨 Fall detected — No response from user';
   } else if (reason === 'fall_ok') {
     reasonLabel = '✅ Fall alert update — User reports they are okay';
+  } else if (reason === 'vitals_critical') {
+    reasonLabel = '🚨 Critical Health Vitals Alert from Smartwatch';
   } else if (reason === 'test') {
     reasonLabel = '🧪 Test alert from Sahaara app';
   }
@@ -282,8 +284,8 @@ export function buildFallbackWaLink(firstContact, name, reason, location) {
 /**
  * Sends SOS alert to backend and returns response + fallback wa.me link
  */
-export async function sendSOS({ reason = 'manual' }) {
-  console.log(`[SOS Service] Starting SOS alert flow with reason: ${reason}`);
+export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = null } = {}) {
+  console.log(`[SOS Service] Starting SOS alert flow with reason: ${reason} (isDemo: ${isDemo})`);
 
   // 1. Obtain authenticated Firebase user
   const user = await getAuthenticatedUser();
@@ -323,6 +325,70 @@ export async function sendSOS({ reason = 'manual' }) {
   const emergencyMessage = buildEmergencyMessage({ name, reason, location });
   const fallbackGuardians = buildFallbackWaLinks(contacts, name, reason, location);
   const fallbackWaLink = fallbackGuardians[0]?.waLink || null;
+
+  // 4b. ISOLATED DEMO MODE EXECUTION
+  // In demo mode: Exercise full local/location/contact/Firestore orchestration WITHOUT dispatching real WhatsApp messages
+  if (isDemo) {
+    console.log('[SOS Service] Processing isolated Demo Mode SOS (Zero external messages dispatched)');
+    let demoAlertId = 'demo-' + Date.now();
+    try {
+      if (db) {
+        const docRef = await addDoc(collection(db, 'sos_alerts'), {
+          userId: user.uid,
+          userEmail: user.email || 'demo@sahaara.app',
+          userName: name,
+          latitude: location?.lat ?? null,
+          longitude: location?.lng ?? null,
+          accuracy: location?.accuracy ?? null,
+          mapsLink: location
+            ? `https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}`
+            : null,
+          address: location?.address ?? null,
+          status: 'DEMO_SIMULATED_SUCCESS',
+          overallStatus: 'DEMO_SIMULATED',
+          whatsappStatus: 'SIMULATED_ISOLATED',
+          isDemo: true,
+          demoEvent: true,
+          demoMetric: demoMetric || null,
+          message: '[DEMO DATA] Simulated Vitals Emergency Alert triggered from Demo Mode',
+          reason,
+          timestamp: serverTimestamp(),
+          contacts: contacts.map((c) => c.name),
+          provider: 'demo_isolated_simulator',
+          sosDispatched: false,
+        });
+        demoAlertId = docRef.id;
+      }
+    } catch (fbErr) {
+      console.log('[SOS Service] Demo alert Firestore record note:', fbErr.message);
+    }
+
+    return {
+      ok: true,
+      isDemo: true,
+      status: 200,
+      overallStatus: 'DEMO_SIMULATED',
+      whatsappStatus: 'SIMULATED_ISOLATED',
+      alertId: demoAlertId,
+      location,
+      contacts,
+      emergencyMessage,
+      fallbackGuardians,
+      fallbackWaLink,
+      results: contacts.map((c) => ({
+        name: c.name,
+        phone: c.phone,
+        status: 'SIMULATED_DEMO_RECIPIENT',
+        delivered: false,
+      })),
+      totalContacts: contacts.length,
+      acceptedCount: contacts.length,
+      acceptedAll: true,
+      provider: 'demo_isolated_simulator',
+      mode: 'demo',
+      deliveryCallbacksEnabled: false,
+    };
+  }
 
   // 5. Retrieve ID token using Firebase Authentication SDK
   let idToken = null;

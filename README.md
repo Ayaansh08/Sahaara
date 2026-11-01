@@ -347,3 +347,115 @@ To send free-form emergency alerts or custom branded SOS templates without Sandb
    - Set `TWILIO_WHATSAPP_MODE=production`.
    - Set `TWILIO_WHATSAPP_FROM=whatsapp:+<your_approved_number>`.
    - Set `TWILIO_WHATSAPP_CONTENT_SID=HX<your_approved_sos_template_sid>`.
+
+
+---
+
+## Smartwatch Integration & Vitals Emergency Monitoring
+
+SAHAARA includes a **Vitals Monitoring & Emergency Detection** system that connects to Android Health Connect to read smartwatch health measurements and automatically trigger emergency assistance when critical vitals are detected.
+
+### 1. Architectural Data Flow
+
+```
+Smartwatch (e.g. Galaxy Watch, Pixel Watch)
+   │
+   ▼
+Manufacturer Companion App (Samsung Health, Fitbit, Garmin Connect)
+   │
+   ▼
+Android Health Connect (Unified on-device health datastore)
+   │
+   ▼
+SAHAARA Health Connect Service (services/healthConnectService.js)
+   │
+   ▼
+Vitals Screen (app/vitals.js) & Critical Event Detection Engine (services/vitalsEngine.js)
+   │
+   ▼
+Emergency Countdown Modal (components/VitalsEmergencyModal.js)
+   │
+   ▼
+Existing SAHAARA SOS Workflow (Foreground GPS + Firestore + Twilio WhatsApp / Fallback)
+```
+
+### 2. Supported Health Metrics & Permissions
+
+SAHAARA requests only the minimum necessary read permissions:
+
+| Metric | Health Connect Permission | Purpose & Rationale |
+|---|---|---|
+| **Heart Rate** | `android.permission.health.READ_HEART_RATE` | Detect severe bradycardia (<40 BPM) or critical tachycardia (>140 BPM). |
+| **Blood Oxygen (SpO2)** | `android.permission.health.READ_OXYGEN_SATURATION` | Detect respiratory distress and severe hypoxemia (<90%). |
+| **Blood Pressure** | `android.permission.health.READ_BLOOD_PRESSURE` | Monitor hypertensive crises (>=180 mmHg) or severe hypotension (<80 mmHg). |
+| **Respiratory Rate** | `android.permission.health.READ_RESPIRATORY_RATE` | Monitor depressed respiration (<10 breaths/min) or severe tachypnea (>=28 breaths/min). |
+| **Resting Heart Rate** | `android.permission.health.READ_RESTING_HEART_RATE` | Track baseline resting cardiac stability. |
+
+### 3. Setting Up Health Connect & Smartwatch Sync
+
+1. **Install Android Health Connect:** Available natively on Android 14+ (Settings > Security & Privacy > Health Connect) or from Google Play on Android 9–13.
+2. **Connect Smartwatch Companion App:**
+   - **Samsung Galaxy Watch:** Open **Samsung Health > Settings > Connected Services > Health Connect** and allow data sharing.
+   - **Google Pixel Watch:** Open **Fitbit app > Settings > Health Connect** and toggle on data sync.
+   - **Google Fit:** Open **Google Fit > Profile > Settings > Sync Fit with Health Connect**.
+3. **Grant SAHAARA Access:** In the SAHAARA app, tap **More > Smartwatch Vitals > Permissions**, and toggle the desired metrics.
+
+### 4. Expo Development Build Requirements
+
+Health Connect requires native Android Jetpack libraries (`androidx.health.connect.client`) and custom Android manifest activity-aliases for permission rationales. 
+
+Standard **Expo Go** does not include native Health Connect code. To test with a live smartwatch:
+
+```bash
+# 1. Clean native prebuild
+npx expo prebuild --clean
+
+# 2. Run local Android Development Build
+npx expo run:android
+```
+
+> **Note on Expo Go:** If running in Expo Go or iOS, the Vitals screen automatically detects the environment and provides the **Hackathon Demo Simulator**, allowing full presentation and testing without a physical wearable.
+
+### 5. Critical Event Detection Engine
+
+Vitals evaluation is decoupled from React components inside `services/vitalsEngine.js` and governed by `config/vitalsRules.js`:
+
+- **Classification States:** `NORMAL`, `ATTENTION`, `CRITICAL`, `UNKNOWN`, `STALE`.
+- **Repeated-Measurement Validation:** A single abnormal reading is held at `ATTENTION` with a verification requirement. At least **2 consecutive abnormal readings** are required to confirm a critical event, preventing false alarms from motion artifacts or sensor slippage.
+- **5-Minute Emergency Cutoff:** Measurements older than 5 minutes are classified as `STALE` for emergency purposes. Historical records can never trigger an automated SOS alert.
+- **Cooldown Debounce:** 15-minute cooldown between automated emergency notifications.
+- **User Opt-Out:** Elders can toggle automatic emergency detection on or off at any time.
+
+### 6. User Safety & Alert Countdown
+
+When a critical health event is detected:
+1. A 10-second high-contrast alert countdown modal opens with a prominent **"I Am Okay — Cancel Alert"** button.
+2. If the user cancels: The countdown aborts, cancellation is logged in Firestore, and no external messages are sent.
+3. If the countdown elapses: The existing SAHAARA SOS workflow is invoked with `reason: 'vitals_critical'`, capturing foreground GPS coordinates and initiating guardian alerts.
+
+### 7. Hackathon Demo Mode
+
+The Vitals screen includes an isolated **Hackathon Demo Simulator**:
+- **Simulate Normal:** Loads synthetic normal vitals (74 BPM, 98% SpO2, 118/76 BP).
+- **Simulate Critical Heart Rate:** Triggers simulated 152 BPM event with alert countdown.
+- **Simulate Critical SpO2:** Triggers simulated 86% SpO2 event with alert countdown.
+- **Demo Safeguards:** All simulated records are labeled `[DEMO DATA]`, `isDemo: true`. Twilio WhatsApp dispatch is isolated, guaranteeing zero unintended messages to real family members during presentations.
+
+### 8. Clinical & Diagnostic Disclaimer
+
+⚠️ **SAHAARA is an informational safety companion, not a certified medical diagnostic device.**
+- Automated real-world emergency dispatch requires formal clinical certification (`isClinicallyApproved: true` in `config/vitalsRules.js`).
+- In uncertified reference mode, real readings surface as informational attention prompts.
+- Twilio Sandbox restrictions remain active on the backend, preventing accidental broadcast in sandbox mode while preserving the manual WhatsApp fallback.
+
+### 9. Automated Verification Suite
+
+The backend includes a comprehensive 58-test automated suite covering Twilio WhatsApp SOS (38 tests) and Health Connect vitals emergency orchestration (20 tests):
+
+```bash
+# Run entire test suite (58 passed, 0 failed)
+npm --prefix server test
+
+# Run vitals & smartwatch emergency suite only (20 passed, 0 failed)
+npm --prefix server run test:vitals
+```

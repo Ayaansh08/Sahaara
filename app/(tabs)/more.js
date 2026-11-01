@@ -83,6 +83,28 @@ export default function MoreTabScreen() {
           <Ionicons name="chevron-forward" size={26} color={colors.ink} />
         </TouchableOpacity>
 
+        {/* Row 2B: Smartwatch Vitals */}
+        <TouchableOpacity
+          style={[styles.rowCard, { backgroundColor: colors.paperDeep, borderWidth: border.width, borderColor: colors.line }]}
+          onPress={() => router.push('/vitals')}
+          activeOpacity={0.85}
+          accessibilityRole="button"
+          accessibilityLabel={isHindi ? 'स्मार्टवॉच वाइटल्स' : 'Smartwatch Vitals'}
+        >
+          <View style={[styles.iconCircle, { backgroundColor: colors.primary + '15' }]}>
+            <Ionicons name="pulse" size={28} color={colors.primary} />
+          </View>
+          <View style={styles.rowTextCol}>
+            <Text style={[textStyle('heading', lang, colors.primary), styles.rowTitle]}>
+              {isHindi ? 'स्मार्टवॉच वाइटल्स' : 'Smartwatch Vitals'}
+            </Text>
+            <Text style={[textStyle('body', lang, colors.inkSoft), styles.rowDesc]}>
+              {isHindi ? 'हृदय गति, ऑक्सीजन व आपातकालीन निगरानी' : 'Heart rate, SpO2 & emergency detection'}
+            </Text>
+          </View>
+          <Ionicons name="chevron-forward" size={26} color={colors.primary} />
+        </TouchableOpacity>
+
         {/* Row 3: Profile */}
         <TouchableOpacity
           style={[styles.rowCard, { backgroundColor: colors.paperDeep, borderWidth: border.width, borderColor: colors.line }]}

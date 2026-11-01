@@ -555,6 +555,27 @@ export default function HomeScreen() {
               </View>
               <Ionicons name="chevron-forward" size={26} color={colors.ink} />
             </TouchableOpacity>
+            {/* Vitals Row: Smartwatch Vitals Monitoring */}
+            <TouchableOpacity
+              style={[styles.colorBlockRow, { backgroundColor: colors.paperDeep, borderWidth: 2, borderColor: colors.line }]}
+              onPress={() => router.push('/vitals')}
+              activeOpacity={0.85}
+              accessibilityRole="button"
+              accessibilityLabel={isHindi ? 'स्मार्टवॉच वाइटल्स' : 'Smartwatch Vitals'}
+            >
+              <View style={[styles.colorBlockIconBox, { backgroundColor: colors.primary + '18' }]}>
+                <Ionicons name="pulse" size={32} color={colors.primary} />
+              </View>
+              <View style={styles.colorBlockTextCol}>
+                <Text style={[styles.colorBlockTitleGold, { color: colors.primary }]}>
+                  {isHindi ? 'स्मार्टवॉच वाइटल्स' : 'Smartwatch Vitals'}
+                </Text>
+                <Text style={[styles.colorBlockDescGold, { color: colors.inkSoft }]}>
+                  {isHindi ? 'हृदय गति, ऑक्सीजन व आपातकालीन निगरानी' : 'Heart rate, SpO2 & emergency alerts'}
+                </Text>
+              </View>
+              <Ionicons name="chevron-forward" size={26} color={colors.primary} />
+            </TouchableOpacity>
           </View>
         </View>
       </ScrollView>

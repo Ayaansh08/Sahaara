@@ -541,7 +541,7 @@ app.post('/api/sos', async (req, res) => {
     const { reason = 'manual', location } = req.body;
 
     // 'test' is strictly removed; connectivity tests must use POST /api/twilio/test-connectivity
-    const allowedReasons = ['manual', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse'];
+    const allowedReasons = ['manual', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse', 'vitals_critical'];
     if (!reason || !allowedReasons.includes(reason)) {
       return res.status(400).json({ ok: false, error: 'Invalid or missing reason' });
     }
@@ -561,7 +561,7 @@ app.post('/api/sos', async (req, res) => {
 
     // 2. Debounce and Rate Limiting by User UID
     const now = Date.now();
-    const isUrgent = (reason === 'manual' || reason === 'fall');
+    const isUrgent = (reason === 'manual' || reason === 'fall' || reason === 'vitals_critical');
     const cooldownMs = isUrgent ? 15000 : 3000;
 
     const limitKey = user.uid;
@@ -732,6 +732,9 @@ app.post('/api/sos', async (req, res) => {
         break;
       case 'fall_noresponse':
         emergencyMessage = 'No response after a fall alert! Please call or check on them immediately.';
+        break;
+      case 'vitals_critical':
+        emergencyMessage = 'Critical health vitals alert detected from smartwatch! Please call or check on them immediately.';
         break;
     }
 

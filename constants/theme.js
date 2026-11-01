@@ -29,7 +29,8 @@ export const colors = {
   zari: '#C9962B',         // gold zari border
 
   // Calm / wellness / success
-  calm: '#1F5C4D',         // bottle green: bhajan, selected mood, success states
+  calm: '#1F5C4D',
+  forest: '#1F5C4D',         // bottle green: bhajan, selected mood, success states
   calmSoft: '#DCE8DF',     // light green wash behind calm elements
 
   // Tab Bar
@@ -38,7 +39,8 @@ export const colors = {
   tabInactive: '#FAF3E3',  // cream for inactive tab icon & label
 
   // Emergency and errors
-  sos: '#C62828',          // reserved for SOS only
+  sos: '#C62828',
+  crimson: '#C62828',          // reserved for SOS only
   sosPressed: '#9E1F1F',
   onSos: '#FFFFFF',
   sosWhite: '#FFFFFF',     // white SOS pill on maroon hero
