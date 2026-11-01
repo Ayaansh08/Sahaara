@@ -1,3 +1,8 @@
+/**
+ * app/(tabs)/_layout.js
+ * Tab bar — Home, Saathi, Memories, Family, Profile.
+ * "More" tab is hidden (redirects to Profile for deep-link safety).
+ */
 import React from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Tabs } from 'expo-router';
@@ -14,11 +19,11 @@ function CustomTabBar({ state, descriptors, navigation, isHindi }) {
   const tabConfig = {
     home: {
       title: isHindi ? 'होम' : 'Home',
-      icon: 'home',
+      icon: 'home-outline',
       activeIcon: 'home',
     },
     saathi: {
-      title: 'SAATHI',
+      title: 'Saathi',
       icon: 'heart-circle-outline',
       activeIcon: 'heart-circle',
     },
@@ -32,10 +37,10 @@ function CustomTabBar({ state, descriptors, navigation, isHindi }) {
       icon: 'people-outline',
       activeIcon: 'people',
     },
-    more: {
-      title: isHindi ? 'और' : 'More',
-      icon: 'grid-outline',
-      activeIcon: 'grid',
+    profile: {
+      title: isHindi ? 'प्रोफ़ाइल' : 'Profile',
+      icon: 'person-circle-outline',
+      activeIcon: 'person-circle',
     },
   };
 
@@ -43,7 +48,7 @@ function CustomTabBar({ state, descriptors, navigation, isHindi }) {
     <View style={[styles.tabBarContainer, { height: barHeight, paddingBottom: bottomPadding }]}>
       {state.routes.map((route, index) => {
         const { options } = descriptors[route.key];
-        // Skip hidden tabs (like profile)
+        // Skip hidden tabs (more redirect, legacy)
         if (options.href === null || !tabConfig[route.name]) {
           return null;
         }
@@ -89,7 +94,7 @@ function CustomTabBar({ state, descriptors, navigation, isHindi }) {
               <Ionicons name={iconName} size={sizes.tabIcon} color={tintColor} />
             </View>
 
-            {/* Label (15-16px) */}
+            {/* Label */}
             <Text
               style={[
                 styles.tabLabel,
@@ -127,7 +132,7 @@ export default function TabsLayout() {
       <Tabs.Screen
         name="saathi"
         options={{
-          title: 'SAATHI',
+          title: 'Saathi',
         }}
       />
       <Tabs.Screen
@@ -143,15 +148,16 @@ export default function TabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="more"
-        options={{
-          title: isHindi ? 'और' : 'More',
-        }}
-      />
-      <Tabs.Screen
         name="profile"
         options={{
-          href: null, // Hidden from tab bar; opens from More or direct route
+          title: isHindi ? 'प्रोफ़ाइल' : 'Profile',
+        }}
+      />
+      {/* Legacy "more" tab — hidden, redirects to profile */}
+      <Tabs.Screen
+        name="more"
+        options={{
+          href: null,
         }}
       />
     </Tabs>
@@ -189,7 +195,7 @@ const styles = StyleSheet.create({
   },
   tabLabel: {
     fontFamily: fonts.bodyStrong,
-    fontSize: sizes.tabLabel, // 16px
+    fontSize: sizes.tabLabel,
     lineHeight: 20,
     textAlign: 'center',
   },

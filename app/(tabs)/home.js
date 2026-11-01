@@ -463,6 +463,7 @@ export default function HomeScreen() {
                   width={120}
                   height={150}
                   fallbackIcon="images-outline"
+                  fallbackLabel={!displayMemoryPhoto ? (isHindi ? 'फ़ोटो नहीं है' : 'No photo') : null}
                 />
 
                 {/* Right: Year, Title/Place (22px serif), Story 2 lines (18px) */}
@@ -537,7 +538,7 @@ export default function HomeScreen() {
             {/* Wellness Row: Solid Gold (#C9962B), ink text, 72px+ tall, 16px radius */}
             <TouchableOpacity
               style={[styles.colorBlockRow, { backgroundColor: colors.gold }]}
-              onPress={() => router.push('/(tabs)/more')}
+              onPress={() => router.push('/wellness')}
               activeOpacity={0.85}
               accessibilityRole="button"
               accessibilityLabel={isHindi ? 'दैनिक स्वास्थ्य' : 'Daily Wellness'}

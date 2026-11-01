@@ -166,6 +166,7 @@ export const sizes = {
   tabIcon:      28,
   tabLabel:     16,
   sosHero:      56,   // White SOS pill on maroon hero (56px tall)
+  sos:          40,   // Generic SOS pill (alias used in ScreenHeader)
   sosCream:     48,   // Red SOS pill on cream screens
   moodCircle:   64,   // Mood buttons 64px circles
 };
