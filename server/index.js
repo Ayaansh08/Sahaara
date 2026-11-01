@@ -54,6 +54,9 @@ const {
 
 const {
   getWhatsGatewayConfig,
+  getDemoConfig,
+  formatGatewayEmergencyMessage,
+  formatGatewayDemoMessage,
   sendSosAlertsToGuardiansGateway,
   checkWhatsGatewayHealth,
   validateGatewayWebhookSignature,
@@ -637,7 +640,7 @@ app.post('/api/whatsgateway/callback', async (req, res) => {
  */
 app.post('/api/sos', async (req, res) => {
   try {
-    const { reason = 'manual', location, vitalsDetail } = req.body;
+    const { reason = 'manual', location, vitalsDetail, isDemo = false } = req.body;
 
     // 'test' is strictly removed; connectivity tests must use test-connectivity endpoints
     const allowedReasons = ['manual', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse', 'vitals_critical'];
@@ -663,7 +666,7 @@ app.post('/api/sos', async (req, res) => {
     const isUrgent = (reason === 'manual' || reason === 'fall' || reason === 'vitals_critical');
     const cooldownMs = isUrgent ? 15000 : 3000;
 
-    const limitKey = user.uid;
+    const limitKey = `${user.uid}_${Boolean(isDemo) ? 'demo' : 'live'}`;
     const limitRecord = sosRateLimits.get(limitKey) || { lastUrgent: 0, lastQuick: 0 };
     const lastTimestamp = isUrgent ? limitRecord.lastUrgent : limitRecord.lastQuick;
 
@@ -707,18 +710,6 @@ app.post('/api/sos', async (req, res) => {
       };
     }
 
-    // 5. Retrieve user's emergency contacts from Firestore (never accept arbitrary numbers or test overrides from body)
-    const contacts = await getUserEmergencyContacts(user.uid, user.token);
-    if (!Array.isArray(contacts) || contacts.length === 0) {
-      console.log(`[SOS] Alert (${reason}) for ${user.name} (${user.uid}): No emergency contacts found in Firestore.`);
-      return res.status(400).json({
-        ok: false,
-        overallStatus: 'FAILED',
-        error: 'No valid emergency contacts configured. Please add emergency contacts in the Sahaara app.',
-        results: [],
-      });
-    }
-
     // Current time in IST
     const istTime = new Date().toLocaleString('en-IN', {
       timeZone: 'Asia/Kolkata',
@@ -740,6 +731,170 @@ app.post('/api/sos', async (req, res) => {
       locationSummary = validLocation.address
         ? `${validLocation.address} (${latStr}, ${lngStr})`
         : `Coordinates: ${latStr}, ${lngStr}`;
+    }
+
+    const firestoreDb = getFirestoreDb();
+
+    // 4b. CONTROLLED DEMO MODE EXECUTION
+    if (Boolean(isDemo)) {
+      const demoConfig = getDemoConfig();
+
+      // Case A: Real delivery is disabled (default safe isolation)
+      if (!demoConfig.allowRealSend) {
+        console.log(`[SOS Demo] Demo alert received for ${user.name} (${user.uid}). Real WhatsApp delivery is disabled (DEMO_ALLOW_REAL_WHATSAPP_SEND=false).`);
+        const alertId = await createInitialSosAlertRecord({
+          userId: user.uid,
+          userEmail: user.email,
+          userName: user.name,
+          location: validLocation,
+          reason,
+          contacts: [],
+          provider: 'demo_isolated_simulator',
+          token: user.token,
+          firestoreDb,
+        });
+
+        await updateSosAlertRecord({
+          alertId,
+          status: 'DEMO_SIMULATED',
+          overallStatus: 'DEMO_SIMULATED',
+          results: [],
+          token: user.token,
+          firestoreDb,
+        });
+
+        return res.json({
+          ok: true,
+          isDemo: true,
+          demoRealDeliveryEnabled: false,
+          overallStatus: 'DEMO_SIMULATED',
+          statusCategory: 'DEMO_SIMULATED',
+          provider: 'demo_isolated_simulator',
+          message: 'Demo mode executed locally. Real WhatsApp delivery is disabled (DEMO_ALLOW_REAL_WHATSAPP_SEND=false).',
+          totalContacts: 0,
+          acceptedCount: 0,
+          results: [],
+          alertId,
+          location: validLocation,
+        });
+      }
+
+      // Case B: Real delivery enabled (DEMO_ALLOW_REAL_WHATSAPP_SEND=true)
+      console.log(`[SOS Demo] Controlled real WhatsApp delivery requested for demo alert (${user.name}). Configured test recipients: ${demoConfig.testRecipients.length}`);
+
+      if (demoConfig.testRecipients.length === 0) {
+        console.warn('[SOS Demo] DEMO_ALLOW_REAL_WHATSAPP_SEND is true but DEMO_TEST_RECIPIENTS contains no valid numbers.');
+        return res.status(200).json({
+          ok: false,
+          isDemo: true,
+          demoRealDeliveryEnabled: true,
+          overallStatus: 'DEMO_MESSAGE_FAILED',
+          statusCategory: 'DEMO_MESSAGE_FAILED',
+          code: 'DEMO_TEST_RECIPIENTS_NOT_CONFIGURED',
+          error: 'Demo delivery is enabled on the server, but no valid test recipients are configured in DEMO_TEST_RECIPIENTS in server/.env.',
+          totalContacts: 0,
+          acceptedCount: 0,
+          results: [],
+          provider: 'whatsgateway',
+        });
+      }
+
+      const gatewayConfig = getWhatsGatewayConfig();
+      if (!gatewayConfig.apiKey) {
+        console.warn('[SOS Demo] WhatsGateway API key missing for demo send.');
+        return res.status(503).json({
+          ok: false,
+          isDemo: true,
+          demoRealDeliveryEnabled: true,
+          overallStatus: 'DEMO_MESSAGE_FAILED',
+          statusCategory: 'DEMO_MESSAGE_FAILED',
+          error: 'WhatsGateway is not configured on the server. Please set WHATSAPP_GATEWAY_API_KEY in server/.env',
+          results: [],
+          provider: 'whatsgateway',
+        });
+      }
+
+      // Format dedicated demo emergency message (clearly states TEST / NOT AN EMERGENCY)
+      const demoMessage = formatGatewayDemoMessage({
+        userName: user.name,
+        vitalsDetail,
+        locationSummary,
+        mapsLink: mapsUrl,
+        timeString: `${istTime} IST`,
+      });
+
+      const testGuardians = demoConfig.testRecipients.map((phone, idx) => ({
+        name: `Test Recipient ${idx + 1}`,
+        phone,
+        relation: 'Demo Tester',
+      }));
+
+      const alertId = await createInitialSosAlertRecord({
+        userId: user.uid,
+        userEmail: user.email,
+        userName: user.name,
+        location: validLocation,
+        reason,
+        contacts: testGuardians,
+        provider: 'whatsgateway',
+        token: user.token,
+        firestoreDb,
+      });
+
+      const sendResult = await sendSosAlertsToGuardiansGateway({
+        guardians: testGuardians,
+        userName: user.name,
+        emergencyMessage: demoMessage,
+        customMessage: demoMessage,
+        locationSummary,
+        mapsLink: mapsUrl,
+        timeString: `${istTime} IST`,
+        userId: user.uid,
+        alertId,
+        firestoreDb,
+        config: gatewayConfig,
+      });
+
+      const demoStatus = sendResult.ok ? 'DEMO_MESSAGE_QUEUED' : 'DEMO_MESSAGE_FAILED';
+
+      await updateSosAlertRecord({
+        alertId,
+        status: demoStatus,
+        overallStatus: demoStatus,
+        results: sendResult.results,
+        token: user.token,
+        firestoreDb,
+      });
+
+      return res.json({
+        ok: sendResult.ok,
+        isDemo: true,
+        demoRealDeliveryEnabled: true,
+        overallStatus: demoStatus,
+        statusCategory: demoStatus,
+        acceptedAll: sendResult.acceptedAll,
+        acceptedCount: sendResult.acceptedCount,
+        totalContacts: sendResult.totalContacts,
+        results: sendResult.results,
+        location: validLocation,
+        alertId,
+        provider: 'whatsgateway',
+        message: demoMessage,
+        deliveryCallbacksEnabled: sendResult.deliveryCallbacksEnabled,
+        statusCallbackUrl: sendResult.statusCallbackUrl,
+      });
+    }
+
+    // 5. Retrieve user's emergency contacts from Firestore (never accept arbitrary numbers or test overrides from body)
+    const contacts = await getUserEmergencyContacts(user.uid, user.token);
+    if (!Array.isArray(contacts) || contacts.length === 0) {
+      console.log(`[SOS] Alert (${reason}) for ${user.name} (${user.uid}): No emergency contacts found in Firestore.`);
+      return res.status(400).json({
+        ok: false,
+        overallStatus: 'FAILED',
+        error: 'No valid emergency contacts configured. Please add emergency contacts in the Sahaara app.',
+        results: [],
+      });
     }
 
     // Generate emergency message based on reason
@@ -766,8 +921,6 @@ app.post('/api/sos', async (req, res) => {
           : 'Critical health vitals alert detected from smartwatch! Please call or check on them immediately.';
         break;
     }
-
-    const firestoreDb = getFirestoreDb();
 
     // =========================================================================
     // BRANCH A: WhatsGateway Self-Hosted WhatsApp Provider (Active Default)
@@ -825,9 +978,12 @@ app.post('/api/sos', async (req, res) => {
         firestoreDb,
       });
 
+      const realSosStatus = sendResult.ok ? 'SOS_MESSAGE_QUEUED' : 'SOS_MESSAGE_FAILED';
       return res.json({
         ok: sendResult.ok,
         overallStatus: sendResult.overallStatus,
+        sosStatus: realSosStatus,
+        statusCategory: realSosStatus,
         acceptedAll: sendResult.acceptedAll,
         acceptedCount: sendResult.acceptedCount,
         totalContacts: sendResult.totalContacts,

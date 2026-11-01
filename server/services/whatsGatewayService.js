@@ -396,7 +396,74 @@ async function sendWhatsGatewayMessage({
 }
 
 /**
- * Sends SOS alerts sequentially to registered guardians.
+ * Retrieves controlled demo mode configuration.
+ * By default, demo mode sends zero external messages (isolated simulator).
+ * If DEMO_ALLOW_REAL_WHATSAPP_SEND=true, external messages are permitted ONLY
+ * to the explicit phone numbers listed in DEMO_TEST_RECIPIENTS.
+ */
+function getDemoConfig() {
+  const allowRealSend = String(process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND || '').trim().toLowerCase() === 'true';
+  const rawRecipients = String(process.env.DEMO_TEST_RECIPIENTS || '').trim();
+  const testRecipients = rawRecipients
+    ? rawRecipients
+        .split(',')
+        .map((p) => normalizeGatewayPhone(p.trim()))
+        .filter(Boolean)
+    : [];
+
+  return {
+    allowRealSend,
+    testRecipients,
+    rawRecipients,
+  };
+}
+
+/**
+ * Formats a clear, unmistakable demonstration notification for WhatsGateway.
+ * Strictly includes TEST / NOT A REAL EMERGENCY notices alongside detected readings.
+ */
+function formatGatewayDemoMessage({
+  userName = 'Sahaara Member',
+  vitalsDetail = null,
+  locationSummary = null,
+  mapsLink = null,
+  timeString = '',
+} = {}) {
+  const readingsText = vitalsDetail
+    ? `Simulated readings:\n${String(vitalsDetail).trim()}`
+    : 'Simulated readings:\nAbnormal vitals threshold exceeded';
+
+  const parts = [
+    `🚨 *SAHAARA — AUTOMATED SOS DEMO TEST* 🚨`,
+    ``,
+    `This is a test notification generated during a SAHAARA demonstration for *${userName}*.`,
+    `*This is NOT a real emergency.*`,
+    ``,
+    readingsText,
+  ];
+
+  if (locationSummary && locationSummary !== 'Location unavailable (GPS off or weak signal)') {
+    parts.push(``);
+    parts.push(`📍 *Demo Location:* ${locationSummary}`);
+    if (mapsLink && mapsLink !== 'No coordinates available') {
+      parts.push(`🗺️ *Map:* ${mapsLink}`);
+    }
+  }
+
+  if (timeString) {
+    parts.push(`🕒 *Demo Time:* ${timeString}`);
+  }
+
+  parts.push(``);
+  parts.push(`The automatic Vitals SOS detection and WhatsApp notification pipeline was triggered successfully.`);
+  parts.push(``);
+  parts.push(`⚠️ *Please do not treat this message as an actual emergency.*`);
+
+  return parts.join('\n');
+}
+
+/**
+ * Sends SOS alerts sequentially to registered guardians (or test recipients).
  * Processing continues for remaining guardians even if one fails.
  */
 async function sendSosAlertsToGuardiansGateway({
@@ -406,6 +473,7 @@ async function sendSosAlertsToGuardiansGateway({
   locationSummary = 'Location unavailable (GPS off or weak signal)',
   mapsLink = 'No coordinates available',
   timeString = '',
+  customMessage = null,
   userId,
   alertId,
   firestoreDb = null,
@@ -413,7 +481,7 @@ async function sendSosAlertsToGuardiansGateway({
   injectedFetch = null,
 }) {
   const effectiveConfig = config || getWhatsGatewayConfig();
-  const formattedMessage = formatGatewayEmergencyMessage({
+  const formattedMessage = customMessage || formatGatewayEmergencyMessage({
     userName,
     emergencyMessage,
     locationSummary,
@@ -686,7 +754,9 @@ module.exports = {
   GATEWAY_STATUS_RANK,
   normalizeGatewayPhone,
   getWhatsGatewayConfig,
+  getDemoConfig,
   formatGatewayEmergencyMessage,
+  formatGatewayDemoMessage,
   sendWhatsGatewayMessage,
   sendSosAlertsToGuardiansGateway,
   checkWhatsGatewayHealth,

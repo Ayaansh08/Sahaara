@@ -284,12 +284,53 @@ export function buildFallbackWaLink(firstContact, name, reason, location) {
   return buildGuardianWaLink(firstContact, message);
 }
 
+// Module-scoped locks for SOS dispatch deduplication
+let activeSosPromise = null;
+let lastSosDispatchTime = 0;
+let lastSosResult = null;
+let lastSosKey = '';
+
 /**
- * Sends SOS alert to backend and returns response + fallback wa.me link
+ * Sends SOS alert to backend and returns response + fallback wa.me link.
+ * Protected against duplicate concurrent calls and rapid multi-triggers.
  */
 export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = null, vitalsDetail = null } = {}) {
-  console.log(`[SOS Service] Starting SOS alert flow with reason: ${reason} (isDemo: ${isDemo})`);
   const effectiveVitalsDetail = demoMetric || vitalsDetail || null;
+  const dispatchKey = `${reason}_${Boolean(isDemo)}_${effectiveVitalsDetail || ''}`;
+  const now = Date.now();
+
+  // 1. In-flight lock: If a dispatch is currently running, return the active promise
+  if (activeSosPromise) {
+    console.log('[SOS Service] SOS dispatch already in-flight. Returning existing dispatch promise.');
+    return activeSosPromise;
+  }
+
+  // 2. Cooldown lock: If exact identical dispatch completed < 4000ms ago, return recent result
+  if (lastSosResult && dispatchKey === lastSosKey && (now - lastSosDispatchTime) < 4000) {
+    console.log('[SOS Service] Debouncing duplicate SOS dispatch call. Returning recent result.');
+    return lastSosResult;
+  }
+
+  activeSosPromise = (async () => {
+    try {
+      const res = await _executeSendSOS({ reason, isDemo, demoMetric, vitalsDetail, effectiveVitalsDetail });
+      lastSosResult = res;
+      lastSosDispatchTime = Date.now();
+      lastSosKey = dispatchKey;
+      return res;
+    } finally {
+      activeSosPromise = null;
+    }
+  })();
+
+  return activeSosPromise;
+}
+
+/**
+ * Internal SOS dispatch executor.
+ */
+async function _executeSendSOS({ reason = 'manual', isDemo = false, demoMetric = null, vitalsDetail = null, effectiveVitalsDetail = null } = {}) {
+  console.log(`[SOS Service] Starting SOS alert flow with reason: ${reason} (isDemo: ${isDemo})`);
 
   // 1. Obtain authenticated Firebase user
   const user = await getAuthenticatedUser();
@@ -301,6 +342,8 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
       authError: true,
       errorCode: 'AUTHENTICATION_REQUIRED',
       overallStatus: 'FAILED',
+      sosStatus: 'SOS_MESSAGE_FAILED',
+      statusCategory: isDemo ? 'DEMO_MESSAGE_FAILED' : 'SOS_MESSAGE_FAILED',
       error: 'AUTHENTICATION_REQUIRED',
       errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
       location: null,
@@ -330,70 +373,6 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
   const fallbackGuardians = buildFallbackWaLinks(contacts, name, reason, location);
   const fallbackWaLink = fallbackGuardians[0]?.waLink || null;
 
-  // 4b. ISOLATED DEMO MODE EXECUTION
-  // In demo mode: Exercise full local/location/contact/Firestore orchestration WITHOUT dispatching real WhatsApp messages
-  if (isDemo) {
-    console.log('[SOS Service] Processing isolated Demo Mode SOS (Zero external messages dispatched)');
-    let demoAlertId = 'demo-' + Date.now();
-    try {
-      if (db) {
-        const docRef = await addDoc(collection(db, 'sos_alerts'), {
-          userId: user.uid,
-          userEmail: user.email || 'demo@sahaara.app',
-          userName: name,
-          latitude: location?.lat ?? null,
-          longitude: location?.lng ?? null,
-          accuracy: location?.accuracy ?? null,
-          mapsLink: location
-            ? `https://www.google.com/maps/search/?api=1&query=${location.lat},${location.lng}`
-            : null,
-          address: location?.address ?? null,
-          status: 'DEMO_SIMULATED_SUCCESS',
-          overallStatus: 'DEMO_SIMULATED',
-          whatsappStatus: 'SIMULATED_ISOLATED',
-          isDemo: true,
-          demoEvent: true,
-          demoMetric: demoMetric || null,
-          message: '[DEMO DATA] Simulated Vitals Emergency Alert triggered from Demo Mode',
-          reason,
-          timestamp: serverTimestamp(),
-          contacts: contacts.map((c) => c.name),
-          provider: 'demo_isolated_simulator',
-          sosDispatched: false,
-        });
-        demoAlertId = docRef.id;
-      }
-    } catch (fbErr) {
-      console.log('[SOS Service] Demo alert Firestore record note:', fbErr.message);
-    }
-
-    return {
-      ok: true,
-      isDemo: true,
-      status: 200,
-      overallStatus: 'DEMO_SIMULATED',
-      whatsappStatus: 'SIMULATED_ISOLATED',
-      alertId: demoAlertId,
-      location,
-      contacts,
-      emergencyMessage,
-      fallbackGuardians,
-      fallbackWaLink,
-      results: contacts.map((c) => ({
-        name: c.name,
-        phone: c.phone,
-        status: 'SIMULATED_DEMO_RECIPIENT',
-        delivered: false,
-      })),
-      totalContacts: contacts.length,
-      acceptedCount: contacts.length,
-      acceptedAll: true,
-      provider: 'demo_isolated_simulator',
-      mode: 'demo',
-      deliveryCallbacksEnabled: false,
-    };
-  }
-
   // 5. Retrieve ID token using Firebase Authentication SDK
   let idToken = null;
   try {
@@ -412,6 +391,8 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
         authError: true,
         errorCode: 'TOKEN_ACQUISITION_FAILED',
         overallStatus: 'FAILED',
+        sosStatus: 'SOS_MESSAGE_FAILED',
+        statusCategory: isDemo ? 'DEMO_MESSAGE_FAILED' : 'SOS_MESSAGE_FAILED',
         error: 'TOKEN_ACQUISITION_FAILED',
         errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
         location,
@@ -439,6 +420,8 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
       authError: true,
       errorCode: 'TOKEN_EMPTY',
       overallStatus: 'FAILED',
+      sosStatus: 'SOS_MESSAGE_FAILED',
+      statusCategory: isDemo ? 'DEMO_MESSAGE_FAILED' : 'SOS_MESSAGE_FAILED',
       error: 'TOKEN_EMPTY',
       errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
       location,
@@ -463,6 +446,7 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
     reason,
     location,
     vitalsDetail: effectiveVitalsDetail,
+    isDemo: Boolean(isDemo),
     contacts: contacts.map(c => ({
       name: c.name,
       phone: c.phone,
@@ -475,7 +459,7 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
     const baseUrl = getApiBaseUrl();
     const endpoint = `${baseUrl}/api/sos`;
 
-    console.log(`[SOS Service] Sending SOS (${reason}) to ${endpoint}`);
+    console.log(`[SOS Service] Sending SOS (${reason}, isDemo=${isDemo}) to ${endpoint}`);
     console.log('[SOS Auth] Authorization header attached: true');
 
     const headers = {
@@ -499,6 +483,8 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
         authError: true,
         errorCode: data.errorCode || 'UNAUTHORIZED',
         overallStatus: 'FAILED',
+        sosStatus: 'SOS_MESSAGE_FAILED',
+        statusCategory: isDemo ? 'DEMO_MESSAGE_FAILED' : 'SOS_MESSAGE_FAILED',
         error: data.error || 'Unauthorized: A valid Firebase ID token is required.',
         errorMessage: 'Your session could not be verified. Please sign in again before triggering SOS.',
         location,
@@ -517,10 +503,48 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
       };
     }
 
+    // Demo Mode Response Handling
+    if (isDemo) {
+      const isQueued = data.overallStatus === 'DEMO_MESSAGE_QUEUED';
+      const isFailed = data.overallStatus === 'DEMO_MESSAGE_FAILED';
+      const statusCategory = data.statusCategory || (isQueued ? 'DEMO_MESSAGE_QUEUED' : (isFailed ? 'DEMO_MESSAGE_FAILED' : 'DEMO_SIMULATED'));
+
+      return {
+        ok: data.ok !== false,
+        status: res.status,
+        isDemo: true,
+        overallStatus: data.overallStatus || statusCategory,
+        statusCategory,
+        demoRealDeliveryEnabled: data.demoRealDeliveryEnabled || false,
+        provider: data.provider || (isQueued ? 'whatsgateway' : 'demo_isolated_simulator'),
+        results: data.results || contacts.map((c) => ({
+          name: c.name,
+          phone: c.phone,
+          status: statusCategory,
+          delivered: false,
+        })),
+        totalContacts: data.totalContacts || (data.results ? data.results.length : contacts.length),
+        acceptedCount: data.acceptedCount || 0,
+        acceptedAll: Boolean(data.acceptedAll),
+        location,
+        contacts,
+        emergencyMessage: data.message || emergencyMessage,
+        fallbackGuardians,
+        fallbackWaLink,
+        error: data.error,
+        errorCode: data.code || data.errorCode,
+        alertId: data.alertId || null,
+      };
+    }
+
+    // Genuine Live Emergency SOS Response Handling
+    const realSosStatus = data.ok ? 'SOS_MESSAGE_QUEUED' : 'SOS_MESSAGE_FAILED';
     return {
       ok: data.ok || false,
       status: res.status,
       overallStatus: data.overallStatus || (data.ok ? (data.acceptedAll ? 'ACCEPTED_ALL' : 'PARTIALLY_ACCEPTED') : 'FAILED'),
+      sosStatus: data.sosStatus || realSosStatus,
+      statusCategory: data.statusCategory || realSosStatus,
       acceptedAll: data.acceptedAll || false,
       acceptedCount: data.acceptedCount || 0,
       totalContacts: data.totalContacts || contacts.length,
@@ -539,9 +563,41 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
     };
   } catch (err) {
     console.log('[SOS Service] Backend call failed:', err.message);
+
+    // If demo mode and backend is unreachable, gracefully fall back to local isolated simulation
+    if (isDemo) {
+      console.log('[SOS Service] Backend unreachable in demo mode. Falling back to local DEMO_SIMULATED.');
+      return {
+        ok: true,
+        isDemo: true,
+        status: 200,
+        overallStatus: 'DEMO_SIMULATED',
+        statusCategory: 'DEMO_SIMULATED',
+        demoRealDeliveryEnabled: false,
+        provider: 'demo_isolated_simulator',
+        results: contacts.map((c) => ({
+          name: c.name,
+          phone: c.phone,
+          status: 'DEMO_SIMULATED',
+          delivered: false,
+        })),
+        totalContacts: contacts.length,
+        acceptedCount: contacts.length,
+        acceptedAll: true,
+        location,
+        contacts,
+        emergencyMessage,
+        fallbackGuardians,
+        fallbackWaLink,
+        alertId: 'demo-fallback-' + Date.now(),
+      };
+    }
+
     return {
       ok: false,
       overallStatus: 'FAILED',
+      sosStatus: 'SOS_MESSAGE_FAILED',
+      statusCategory: 'SOS_MESSAGE_FAILED',
       acceptedAll: false,
       acceptedCount: 0,
       totalContacts: contacts.length,

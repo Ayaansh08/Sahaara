@@ -57,6 +57,7 @@ export default function VitalsEmergencyModal({
   const [manualStates, setManualStates] = useState({});
   const activeOpenContactRef = useRef(null);
   const countdownIntervalRef = useRef(null);
+  const isDispatchingRef = useRef(false);
 
   // AppState listener for WhatsApp return detection
   useEffect(() => {
@@ -80,26 +81,37 @@ export default function VitalsEmergencyModal({
   useEffect(() => {
     if (visible && criticalEvaluation) {
       setStage('countdown');
-      setSecondsLeft(vitalsConfig.emergencyCountdownSeconds || 10);
+      const startSecs = vitalsConfig.emergencyCountdownSeconds || 10;
+      setSecondsLeft(startSecs);
       setSosResult(null);
       setManualStates({});
+      isDispatchingRef.current = false;
 
       if (countdownIntervalRef.current) {
         clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
       }
 
+      let remaining = startSecs;
       countdownIntervalRef.current = setInterval(() => {
-        setSecondsLeft((prev) => {
-          if (prev <= 1) {
+        remaining -= 1;
+        if (remaining <= 0) {
+          if (countdownIntervalRef.current) {
             clearInterval(countdownIntervalRef.current);
             countdownIntervalRef.current = null;
-            // Countdown finished — automatically dispatch SOS
-            handleDispatchSOS();
-            return 0;
           }
-          return prev - 1;
-        });
+          setSecondsLeft(0);
+          handleDispatchSOS();
+        } else {
+          setSecondsLeft(remaining);
+        }
       }, 1000);
+    } else {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+      isDispatchingRef.current = false;
     }
 
     return () => {
@@ -108,7 +120,7 @@ export default function VitalsEmergencyModal({
         countdownIntervalRef.current = null;
       }
     };
-  }, [visible, criticalEvaluation]);
+  }, [visible]);
 
   // Cancel Handler
   const handleCancel = async () => {
@@ -116,6 +128,7 @@ export default function VitalsEmergencyModal({
       clearInterval(countdownIntervalRef.current);
       countdownIntervalRef.current = null;
     }
+    isDispatchingRef.current = false;
 
     setStage('cancelled');
 
@@ -147,8 +160,14 @@ export default function VitalsEmergencyModal({
     onAlertCancelled();
   };
 
-  // Dispatch SOS Workflow
+  // Dispatch SOS Workflow (protected against duplicate invocations)
   const handleDispatchSOS = async () => {
+    if (isDispatchingRef.current) {
+      console.log('[Vitals SOS] Dispatch already in progress. Ignoring duplicate trigger.');
+      return;
+    }
+    isDispatchingRef.current = true;
+
     if (countdownIntervalRef.current) {
       clearInterval(countdownIntervalRef.current);
       countdownIntervalRef.current = null;
@@ -176,7 +195,8 @@ export default function VitalsEmergencyModal({
       console.error('[Vitals SOS] Dispatch error:', err);
       setSosResult({
         ok: false,
-        overallStatus: 'FAILED',
+        overallStatus: isDemo ? 'DEMO_MESSAGE_FAILED' : 'SOS_MESSAGE_FAILED',
+        statusCategory: isDemo ? 'DEMO_MESSAGE_FAILED' : 'SOS_MESSAGE_FAILED',
         error: err.message,
       });
       setStage('result');
@@ -361,35 +381,115 @@ export default function VitalsEmergencyModal({
                 {isDemo ? (
                   // DEMO MODE RESULT
                   <View style={styles.demoResultBox}>
-                    <View style={styles.demoResultHeader}>
-                      <Ionicons name="shield-checkmark" size={28} color={colors.forest} style={{ marginRight: 8 }} />
-                      <Text style={[textStyle('heading', lang, colors.forest), styles.resultHeaderTitle]}>
-                        {isHindi ? 'डेमो आपातकालीन परीक्षण सफल' : 'Demo SOS Workflow Verified'}
-                      </Text>
-                    </View>
-                    <Text style={[textStyle('body', lang, colors.inkSoft), styles.resultBodyText]}>
-                      {isHindi
-                        ? 'सिम्युलेटेड आपातकालीन चक्र सफलतापूर्वक पूरा हुआ। स्थान प्राप्त किया गया और घटना दर्ज की गई।'
-                        : 'Simulated SOS orchestration completed successfully. Foreground GPS was captured and incident logged.'}
-                    </Text>
+                    {sosResult?.overallStatus === 'DEMO_MESSAGE_QUEUED' || sosResult?.statusCategory === 'DEMO_MESSAGE_QUEUED' ? (
+                      // 1. DEMO_MESSAGE_QUEUED (Actual demo message queued by WhatsGateway)
+                      <>
+                        <View style={styles.demoResultHeader}>
+                          <Ionicons name="paper-plane" size={28} color={colors.forest} style={{ marginRight: 8 }} />
+                          <Text style={[textStyle('heading', lang, colors.forest), styles.resultHeaderTitle]}>
+                            {isHindi ? 'डेमो व्हाट्सएप संदेश कतारबद्ध (DEMO_MESSAGE_QUEUED)' : 'Demo WhatsApp Message Queued'}
+                          </Text>
+                        </View>
+                        <Text style={[textStyle('body', lang, colors.inkSoft), styles.resultBodyText]}>
+                          {isHindi
+                            ? 'परीक्षण सूचना व्हाट्सगेटवे द्वारा स्वीकार कर ली गई है और परीक्षण प्राप्तकर्ताओं के लिए कतारबद्ध है।'
+                            : 'Demonstration alert was accepted by WhatsGateway and queued for configured test recipients. This is a controlled test.'}
+                        </Text>
 
-                    {/* Location Summary */}
-                    <View style={styles.infoRow}>
-                      <Ionicons name="location" size={18} color={colors.primary} style={{ marginRight: 6 }} />
-                      <Text style={[textStyle('label', lang, colors.ink), styles.infoText]}>
-                        {sosResult?.location
-                          ? `GPS: ${sosResult.location.lat.toFixed(4)}, ${sosResult.location.lng.toFixed(4)}`
-                          : 'GPS: Simulated / Unavailable'}
-                      </Text>
-                    </View>
+                        {/* Location Summary */}
+                        {sosResult?.location && (
+                          <View style={styles.infoRow}>
+                            <Ionicons name="location" size={18} color={colors.primary} style={{ marginRight: 6 }} />
+                            <Text style={[textStyle('label', lang, colors.ink), styles.infoText]}>
+                              {sosResult.location.address || `GPS: ${sosResult.location.lat.toFixed(4)}, ${sosResult.location.lng.toFixed(4)}`}
+                            </Text>
+                          </View>
+                        )}
 
-                    {/* Safeguards confirmation */}
-                    <View style={styles.safeguardBanner}>
-                      <Ionicons name="lock-closed" size={16} color={colors.forest} style={{ marginRight: 6 }} />
-                      <Text style={[textStyle('label', lang, colors.forest), styles.safeguardText]}>
-                        Safe Demo Guard: Zero real WhatsApp messages were sent to family members.
-                      </Text>
-                    </View>
+                        {/* Configured Test Recipients */}
+                        <View style={styles.manualGuardiansContainer}>
+                          <Text style={[textStyle('label', lang, colors.ink), { fontWeight: '700', marginBottom: 6 }]}>
+                            {isHindi ? 'परीक्षण प्राप्तकर्ता (DEMO_TEST_RECIPIENTS):' : 'Configured Test Recipients:'}
+                          </Text>
+                          {(sosResult?.results || []).map((r, i) => (
+                            <View key={i} style={[styles.guardianCard, { paddingVertical: 8 }]}>
+                              <View style={styles.guardianInfo}>
+                                <Text style={[textStyle('heading', lang, colors.ink), { fontSize: 14 }]}>
+                                  {r.name || `Test Recipient ${i + 1}`}
+                                </Text>
+                                <Text style={[textStyle('label', lang, colors.inkSoft), { fontSize: 12 }]}>
+                                  {r.phone || r.rawPhone}
+                                </Text>
+                              </View>
+                              <View style={[styles.stateBadge, styles.stateBadgeOpened]}>
+                                <Text style={styles.stateBadgeText}>
+                                  {r.status === 'ACCEPTED_BY_GATEWAY' ? 'Queued by Gateway' : (r.status || 'Queued')}
+                                </Text>
+                              </View>
+                            </View>
+                          ))}
+                        </View>
+
+                        <View style={styles.safeguardBanner}>
+                          <Ionicons name="shield-checkmark" size={16} color={colors.forest} style={{ marginRight: 6 }} />
+                          <Text style={[textStyle('label', lang, colors.forest), styles.safeguardText]}>
+                            Safe Demo Isolation: Messages were sent exclusively to configured test recipients. Family guardians were not messaged.
+                          </Text>
+                        </View>
+                      </>
+                    ) : sosResult?.overallStatus === 'DEMO_MESSAGE_FAILED' || sosResult?.statusCategory === 'DEMO_MESSAGE_FAILED' ? (
+                      // 2. DEMO_MESSAGE_FAILED (Actual demo delivery failed)
+                      <>
+                        <View style={styles.demoResultHeader}>
+                          <Ionicons name="alert-circle" size={28} color={colors.crimson} style={{ marginRight: 8 }} />
+                          <Text style={[textStyle('heading', lang, colors.crimson), styles.resultHeaderTitle]}>
+                            {isHindi ? 'डेमो संदेश प्रेषण विफल (DEMO_MESSAGE_FAILED)' : 'Demo Message Dispatch Failed'}
+                          </Text>
+                        </View>
+                        <Text style={[textStyle('body', lang, colors.crimson), styles.resultBodyText]}>
+                          {sosResult?.error || 'Could not dispatch demo WhatsApp notification. Check DEMO_TEST_RECIPIENTS in server/.env or WhatsGateway worker status.'}
+                        </Text>
+                        <View style={[styles.safeguardBanner, { backgroundColor: '#FEE2E2', borderColor: '#FCA5A5' }]}>
+                          <Ionicons name="information-circle" size={16} color={colors.crimson} style={{ marginRight: 6 }} />
+                          <Text style={[textStyle('label', lang, colors.crimson), styles.safeguardText]}>
+                            Status: DEMO_MESSAGE_FAILED. Verify WHATSAPP_GATEWAY_API_KEY and DEMO_TEST_RECIPIENTS on the backend.
+                          </Text>
+                        </View>
+                      </>
+                    ) : (
+                      // 3. DEMO_SIMULATED (Real delivery disabled, safe simulation)
+                      <>
+                        <View style={styles.demoResultHeader}>
+                          <Ionicons name="shield-checkmark" size={28} color={colors.forest} style={{ marginRight: 8 }} />
+                          <Text style={[textStyle('heading', lang, colors.forest), styles.resultHeaderTitle]}>
+                            {isHindi ? 'डेमो आपातकालीन परीक्षण सफल (DEMO_SIMULATED)' : 'Demo SOS Simulation Complete'}
+                          </Text>
+                        </View>
+                        <Text style={[textStyle('body', lang, colors.inkSoft), styles.resultBodyText]}>
+                          {isHindi
+                            ? 'सिम्युलेटेड आपातकालीन चक्र सफलतापूर्वक पूरा हुआ। स्थान प्राप्त किया गया और घटना दर्ज की गई।'
+                            : 'Simulated SOS orchestration completed successfully. Foreground GPS was captured and incident logged.'}
+                        </Text>
+
+                        {/* Location Summary */}
+                        <View style={styles.infoRow}>
+                          <Ionicons name="location" size={18} color={colors.primary} style={{ marginRight: 6 }} />
+                          <Text style={[textStyle('label', lang, colors.ink), styles.infoText]}>
+                            {sosResult?.location
+                              ? `GPS: ${sosResult.location.lat.toFixed(4)}, ${sosResult.location.lng.toFixed(4)}`
+                              : 'GPS: Simulated / Unavailable'}
+                          </Text>
+                        </View>
+
+                        {/* Safeguards confirmation */}
+                        <View style={styles.safeguardBanner}>
+                          <Ionicons name="lock-closed" size={16} color={colors.forest} style={{ marginRight: 6 }} />
+                          <Text style={[textStyle('label', lang, colors.forest), styles.safeguardText]}>
+                            Safe Simulation (DEMO_SIMULATED): Real WhatsApp delivery is disabled (DEMO_ALLOW_REAL_WHATSAPP_SEND=false). Zero external messages dispatched.
+                          </Text>
+                        </View>
+                      </>
+                    )}
                   </View>
                 ) : (
                   // REAL SOS: PRODUCTION OUTCOME
@@ -411,17 +511,17 @@ export default function VitalsEmergencyModal({
                           styles.statusBoxTitle,
                         ]}>
                           {sosResult?.ok
-                            ? (isHindi ? 'व्हाट्सगेटवे: संदेश भेजने के लिए कतारबद्ध' : 'WhatsGateway: Alert Queued for Delivery')
+                            ? (isHindi ? 'आपातकालीन अलर्ट: कतारबद्ध (SOS_MESSAGE_QUEUED)' : 'Emergency Alert: Queued (SOS_MESSAGE_QUEUED)')
                             : isSandboxBlocked
                             ? (isHindi ? 'ट्विलियो सैंडबॉक्स मोड सक्रिय' : 'Twilio Sandbox Mode Active')
-                            : (isHindi ? 'आपातकालीन अलर्ट प्रेषण सूचना' : 'Emergency Alert Dispatch Note')}
+                            : (isHindi ? 'आपातकालीन अलर्ट विफल (SOS_MESSAGE_FAILED)' : 'Emergency Alert Failed (SOS_MESSAGE_FAILED)')}
                         </Text>
                       </View>
                       <Text style={[textStyle('body', lang, colors.ink), styles.statusBoxDesc]}>
                         {sosResult?.ok
                           ? (isHindi
                               ? 'आपातकालीन सूचना व्हाट्सगेटवे द्वारा कतारबद्ध कर ली गई है। वास्तविक डिलीवरी नेटवर्क और प्राप्तकर्ता की उपलब्धता पर निर्भर करती है।'
-                              : 'Your emergency notification was accepted and queued by WhatsGateway. Real WhatsApp delivery depends on network and recipient availability.')
+                              : 'Your emergency notification was accepted and queued by WhatsGateway for all registered guardians. Real WhatsApp delivery depends on network and recipient availability.')
                           : isSandboxBlocked
                           ? (isHindi
                               ? 'ट्विलियो सैंडबॉक्स स्वचालित कस्टम आपातकालीन संदेशों को ब्लॉक करता है। वास्तविक आपातकाल के लिए कृपया नीचे दिए गए हरे बटन से व्हाट्सएप खोलें।'

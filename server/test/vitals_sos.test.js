@@ -1081,6 +1081,660 @@ async function runAllVitalsTests() {
     }
   });
 
+  // =========================================================================
+  // CONTROLLED DEMO MODE WHATSAPP DELIVERY SUITE (Tests 34 - 45)
+  // =========================================================================
+
+  // 34. Demo mode with real delivery disabled sends zero messages (DEMO_SIMULATED)
+  await runTest('34. Demo mode with real delivery disabled sends zero messages (DEMO_SIMULATED)', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'false';
+    process.env.DEMO_TEST_RECIPIENTS = '+919876543210';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let gatewayCalled = false;
+    setGlobalGatewayFetch(async () => {
+      gatewayCalled = true;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true, status: 'queued' }) };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+          vitalsDetail: 'Heart Rate: 152 BPM',
+        },
+        {
+          'Authorization': 'Bearer mock-token-demo-isolated-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, true);
+      assert.strictEqual(res.body.isDemo, true);
+      assert.strictEqual(res.body.demoRealDeliveryEnabled, false);
+      assert.strictEqual(res.body.overallStatus, 'DEMO_SIMULATED');
+      assert.strictEqual(res.body.provider, 'demo_isolated_simulator');
+      assert.strictEqual(gatewayCalled, false);
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 35. Demo mode with real delivery enabled sends an actual mocked WhatsGateway request
+  await runTest('35. Demo mode with real delivery enabled sends an actual mocked WhatsGateway request', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919876543299';
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-demo-gateway-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let gatewayCalled = false;
+    let gatewayBody = null;
+    setGlobalGatewayFetch(async (url, opts) => {
+      gatewayCalled = true;
+      gatewayBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          status: 'queued',
+          message_id: 'wg-demo-01',
+          request_id: 'req-demo-01',
+        }),
+      };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+          vitalsDetail: 'Heart Rate: 155 BPM\nSpO2: 86%',
+        },
+        {
+          'Authorization': 'Bearer mock-token-demo-real-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, true);
+      assert.strictEqual(res.body.isDemo, true);
+      assert.strictEqual(res.body.demoRealDeliveryEnabled, true);
+      assert.strictEqual(res.body.overallStatus, 'DEMO_MESSAGE_QUEUED');
+      assert.strictEqual(res.body.acceptedCount, 1);
+      assert.strictEqual(gatewayCalled, true);
+      assert.strictEqual(gatewayBody.to, '919876543299');
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 36. Demo messages go only to configured test recipients (never to registered emergency contacts)
+  await runTest('36. Demo messages go only to configured test recipients', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919999999999';
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-demo-recipients-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    const dispatchedNumbers = [];
+    setGlobalGatewayFetch(async (url, opts) => {
+      const b = JSON.parse(opts.body);
+      dispatchedNumbers.push(b.to);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-demo' }),
+      };
+    });
+
+    // Registered contacts in Firestore
+    setTestMockContactsResolver(() => [
+      { name: 'Dr. Family', phone: '+919876543210', relation: 'Doctor' },
+      { name: 'Son Guardian', phone: '+919876543211', relation: 'Son' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+          vitalsDetail: 'Heart Rate: 152 BPM',
+        },
+        {
+          'Authorization': 'Bearer mock-token-contacts-isolation-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(dispatchedNumbers.length, 1);
+      assert.strictEqual(dispatchedNumbers[0], '919999999999'); // Only test recipient received!
+      assert(!dispatchedNumbers.includes('919876543210')); // Real family contacts NEVER messaged
+      assert(!dispatchedNumbers.includes('919876543211'));
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 37. Demo messages contain the TEST / NOT A REAL EMERGENCY warning and actual readings
+  await runTest('37. Demo messages contain the TEST / NOT A REAL EMERGENCY warning', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919876543210';
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-demo-content-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let dispatchedMessage = '';
+    setGlobalGatewayFetch(async (url, opts) => {
+      const b = JSON.parse(opts.body);
+      dispatchedMessage = b.message;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-demo-warning' }),
+      };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+          vitalsDetail: 'Heart Rate: 155 BPM\nSpO2: 86%',
+        },
+        {
+          'Authorization': 'Bearer mock-token-content-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.ok(dispatchedMessage.includes('AUTOMATED SOS DEMO TEST'));
+      assert.ok(dispatchedMessage.includes('This is NOT a real emergency'));
+      assert.ok(dispatchedMessage.includes('Heart Rate: 155 BPM'));
+      assert.ok(dispatchedMessage.includes('SpO2: 86%'));
+      assert.ok(dispatchedMessage.includes('Please do not treat this message as an actual emergency'));
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 38. Missing configuration prevents external delivery
+  await runTest('38. Missing configuration prevents external delivery', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = ''; // Empty recipients
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let gatewayCalled = false;
+    setGlobalGatewayFetch(async () => {
+      gatewayCalled = true;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+        },
+        {
+          'Authorization': 'Bearer mock-token-empty-config-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, false);
+      assert.strictEqual(res.body.overallStatus, 'DEMO_MESSAGE_FAILED');
+      assert.strictEqual(res.body.code, 'DEMO_TEST_RECIPIENTS_NOT_CONFIGURED');
+      assert.strictEqual(gatewayCalled, false); // No message dispatched
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 39. Unauthorized requests cannot enable demo sending
+  await runTest('39. Unauthorized requests cannot enable demo sending', async () => {
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+        }
+      );
+
+      assert.strictEqual(res.status, 401);
+      assert.strictEqual(res.body.errorCode, 'AUTH_HEADER_MISSING');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 40. Invalid recipients in DEMO_TEST_RECIPIENTS are rejected
+  await runTest('40. Invalid recipients in DEMO_TEST_RECIPIENTS are rejected', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = 'invalid-number, abc, 1234';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let gatewayCalled = false;
+    setGlobalGatewayFetch(async () => {
+      gatewayCalled = true;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+        },
+        {
+          'Authorization': 'Bearer mock-token-invalid-recipients-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, false);
+      assert.strictEqual(res.body.overallStatus, 'DEMO_MESSAGE_FAILED');
+      assert.strictEqual(gatewayCalled, false);
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 41. Duplicate triggers do not create duplicate messages (rate limit enforced)
+  await runTest('41. Duplicate triggers do not create duplicate messages (rate limit enforced)', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919876543210';
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-rate-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let callCount = 0;
+    setGlobalGatewayFetch(async () => {
+      callCount++;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-rate' }),
+      };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const authHeader = {
+        'Authorization': 'Bearer mock-token-rate-limit-demo-user',
+        'x-test-auth-mock': 'true',
+      };
+
+      // Call 1: Success
+      const res1 = await makePostRequest(port, '/api/sos', { reason: 'vitals_critical', isDemo: true }, authHeader);
+      assert.strictEqual(res1.status, 200);
+      assert.strictEqual(callCount, 1);
+
+      // Call 2: Immediate duplicate -> 429
+      const res2 = await makePostRequest(port, '/api/sos', { reason: 'vitals_critical', isDemo: true }, authHeader);
+      assert.strictEqual(res2.status, 429);
+      assert.strictEqual(callCount, 1); // No second message was dispatched!
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 42. Gateway failure is reported accurately as DEMO_MESSAGE_FAILED
+  await runTest('42. Gateway failure is reported accurately as DEMO_MESSAGE_FAILED', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919876543210';
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-fail-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    setGlobalGatewayFetch(async () => ({
+      ok: false,
+      status: 503,
+      text: async () => JSON.stringify({ ok: false, error: 'WhatsGateway worker unavailable' }),
+    }));
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+        },
+        {
+          'Authorization': 'Bearer mock-token-fail-gateway-demo-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, false);
+      assert.strictEqual(res.body.overallStatus, 'DEMO_MESSAGE_FAILED');
+      assert.strictEqual(res.body.statusCategory, 'DEMO_MESSAGE_FAILED');
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 43. Manual SOS still works via WhatsGateway and reports SOS_MESSAGE_QUEUED
+  await runTest('43. Manual SOS still works via WhatsGateway and reports SOS_MESSAGE_QUEUED', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-manual-queued-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    setGlobalGatewayFetch(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-manual-queued' }),
+    }));
+
+    setTestMockContactsResolver(() => [
+      { name: 'Family Doctor', phone: '+919876543210', relation: 'Doctor' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'manual',
+          isDemo: false,
+        },
+        {
+          'Authorization': 'Bearer mock-token-manual-sos-real-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, true);
+      assert.strictEqual(res.body.overallStatus, 'ACCEPTED_ALL');
+      assert.strictEqual(res.body.sosStatus, 'SOS_MESSAGE_QUEUED');
+      assert.strictEqual(res.body.statusCategory, 'SOS_MESSAGE_QUEUED');
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 44. Genuine live-data SOS still uses all registered guardians
+  await runTest('44. Genuine live-data SOS still uses all registered guardians', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919999999999'; // Test recipient should NOT be used for real SOS!
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-live-guardians-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    const dispatchedNumbers = [];
+    setGlobalGatewayFetch(async (url, opts) => {
+      const b = JSON.parse(opts.body);
+      dispatchedNumbers.push(b.to);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-live-' + b.to }),
+      };
+    });
+
+    setTestMockContactsResolver(() => [
+      { name: 'Son Rahul', phone: '+919876543211', relation: 'Son' },
+      { name: 'Daughter Priya', phone: '+919876543212', relation: 'Daughter' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: false,
+          vitalsDetail: 'spo2: 84%',
+        },
+        {
+          'Authorization': 'Bearer mock-token-live-real-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.totalContacts, 2);
+      assert.strictEqual(res.body.acceptedCount, 2);
+      assert.strictEqual(dispatchedNumbers.length, 2);
+      assert.ok(dispatchedNumbers.includes('919876543211'));
+      assert.ok(dispatchedNumbers.includes('919876543212'));
+      assert(!dispatchedNumbers.includes('919999999999')); // Test recipient was NOT messaged!
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 45. Simulated readings cannot create real emergency SOS events
+  await runTest('45. Simulated readings cannot create real emergency SOS events', async () => {
+    const origAllow = process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND;
+    const origRecipients = process.env.DEMO_TEST_RECIPIENTS;
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+
+    process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = 'true';
+    process.env.DEMO_TEST_RECIPIENTS = '+919876543210';
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-sim-isolation-key';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let dispatchedMessage = '';
+    setGlobalGatewayFetch(async (url, opts) => {
+      const b = JSON.parse(opts.body);
+      dispatchedMessage = b.message;
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-sim-check' }),
+      };
+    });
+
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          isDemo: true,
+          vitalsDetail: 'heartRate: 152 BPM',
+        },
+        {
+          'Authorization': 'Bearer mock-token-sim-isolation-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.isDemo, true);
+      assert.strictEqual(res.body.overallStatus, 'DEMO_MESSAGE_QUEUED');
+      assert.notStrictEqual(res.body.overallStatus, 'ACCEPTED_ALL'); // Never masquerades as real emergency
+      assert.ok(dispatchedMessage.includes('AUTOMATED SOS DEMO TEST'));
+      assert.ok(dispatchedMessage.includes('This is NOT a real emergency'));
+    } finally {
+      process.env.DEMO_ALLOW_REAL_WHATSAPP_SEND = origAllow;
+      process.env.DEMO_TEST_RECIPIENTS = origRecipients;
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
   console.log('\n================================================================');
   console.log(`Results: ${passedCount} passed, ${failedCount} failed.`);
   console.log('================================================================\n');
