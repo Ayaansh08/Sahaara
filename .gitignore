@@ -46,3 +46,10 @@ scratch*
 # Generated Native Folders
 /ios
 /android
+
+# Agent Office & Coordination Harness (Local Only)
+hive/
+palace/
+roster-backups/
+roster.json
+hallways.json
