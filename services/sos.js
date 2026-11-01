@@ -196,6 +196,7 @@ export function buildEmergencyMessage({
   reason = 'manual',
   location = null,
   timestamp = null,
+  vitalsDetail = null,
 }) {
   const timeStr =
     timestamp ||
@@ -218,7 +219,9 @@ export function buildEmergencyMessage({
   } else if (reason === 'fall_ok') {
     reasonLabel = '✅ Fall alert update — User reports they are okay';
   } else if (reason === 'vitals_critical') {
-    reasonLabel = '🚨 Critical Health Vitals Alert from Smartwatch';
+    reasonLabel = vitalsDetail
+      ? `🚨 Critical Health Vitals Alert (${vitalsDetail})`
+      : '🚨 Critical Health Vitals Alert from Smartwatch';
   } else if (reason === 'test') {
     reasonLabel = '🧪 Test alert from Sahaara app';
   }
@@ -284,8 +287,9 @@ export function buildFallbackWaLink(firstContact, name, reason, location) {
 /**
  * Sends SOS alert to backend and returns response + fallback wa.me link
  */
-export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = null } = {}) {
+export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = null, vitalsDetail = null } = {}) {
   console.log(`[SOS Service] Starting SOS alert flow with reason: ${reason} (isDemo: ${isDemo})`);
+  const effectiveVitalsDetail = demoMetric || vitalsDetail || null;
 
   // 1. Obtain authenticated Firebase user
   const user = await getAuthenticatedUser();
@@ -322,7 +326,7 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
   const location = await getCurrentLocation();
 
   // 4. Build formatted emergency message and guardian fallback links
-  const emergencyMessage = buildEmergencyMessage({ name, reason, location });
+  const emergencyMessage = buildEmergencyMessage({ name, reason, location, vitalsDetail: effectiveVitalsDetail });
   const fallbackGuardians = buildFallbackWaLinks(contacts, name, reason, location);
   const fallbackWaLink = fallbackGuardians[0]?.waLink || null;
 
@@ -446,8 +450,8 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
       totalContacts: contacts.length,
       acceptedCount: 0,
       acceptedAll: false,
-      provider: 'twilio_whatsapp',
-      mode: 'sandbox',
+      provider: 'whatsgateway',
+      mode: 'gateway',
       deliveryCallbacksEnabled: false,
       alertId: null,
     };
@@ -458,6 +462,7 @@ export async function sendSOS({ reason = 'manual', isDemo = false, demoMetric = 
     name,
     reason,
     location,
+    vitalsDetail: effectiveVitalsDetail,
     contacts: contacts.map(c => ({
       name: c.name,
       phone: c.phone,

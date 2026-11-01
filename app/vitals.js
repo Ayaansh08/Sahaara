@@ -95,8 +95,9 @@ export default function VitalsScreen() {
   // Demo Mode State
   const [isDemoModeActive, setIsDemoModeActive] = useState(false);
 
-  // Double trigger protection
+  // Double trigger protection & history cache across sync cycles
   const lastAutoSosTimeRef = useRef(0);
+  const vitalsHistoryRef = useRef({});
 
   // Load preferences
   useEffect(() => {
@@ -135,11 +136,44 @@ export default function VitalsScreen() {
         setDetectedSources(data.sources || []);
         setLastSyncTime(data.lastSyncTime || Date.now());
 
-        // Evaluate snapshot
-        const summary = evaluateVitalsSnapshot(data.vitals || {}, {}, {
+        // Merge newly fetched history with in-memory history buffer within emergencyMaxAgeMs
+        const now = Date.now();
+        const cutoff = now - vitalsConfig.emergencyMaxAgeMs;
+        const mergedHistory = {};
+
+        const metricKeys = ['heartRate', 'spo2', 'bloodPressure', 'respiratoryRate', 'restingHeartRate'];
+        for (const metric of metricKeys) {
+          const fromService = (data.history && data.history[metric]) || [];
+          const fromRef = vitalsHistoryRef.current[metric] || [];
+          const combined = [...fromService, ...fromRef].filter(r => r && r.timestamp >= cutoff);
+          const seen = new Set();
+          const unique = [];
+          for (const item of combined) {
+            if (!seen.has(item.timestamp)) {
+              seen.add(item.timestamp);
+              unique.push(item);
+            }
+          }
+          unique.sort((a, b) => b.timestamp - a.timestamp);
+          mergedHistory[metric] = unique;
+        }
+
+        // Evaluate snapshot with complete history
+        const summary = evaluateVitalsSnapshot(data.vitals || {}, mergedHistory, {
           userOptedIn: autoSosEnabled,
         });
         setEvaluationSummary(summary);
+
+        // Update history cache for subsequent sync cycles
+        for (const [metric, reading] of Object.entries(data.vitals || {})) {
+          if (reading && reading.timestamp >= cutoff) {
+            const list = mergedHistory[metric] || [];
+            if (!list.some(r => r.timestamp === reading.timestamp)) {
+              mergedHistory[metric] = [reading, ...list].sort((a, b) => b.timestamp - a.timestamp);
+            }
+          }
+        }
+        vitalsHistoryRef.current = mergedHistory;
 
         // Fetch real trends
         const hrTrend = await fetchVitalsTrends('heartRate', trendFilter);
@@ -149,9 +183,9 @@ export default function VitalsScreen() {
 
         // Check if genuine critical event detected (with cooldown protection)
         if (summary.canTriggerSos && !summary.isDemo) {
-          const now = Date.now();
-          if (now - lastAutoSosTimeRef.current > vitalsConfig.emergencyCooldownMs) {
-            lastAutoSosTimeRef.current = now;
+          const nowTime = Date.now();
+          if (nowTime - lastAutoSosTimeRef.current > vitalsConfig.emergencyCooldownMs) {
+            lastAutoSosTimeRef.current = nowTime;
             setCriticalEvent(summary.criticalCandidate);
             setIsDemoEmergency(false);
             setEmergencyModalVisible(true);
@@ -168,7 +202,7 @@ export default function VitalsScreen() {
     }
   }, [isDemoModeActive, autoSosEnabled, trendFilter]);
 
-  // Initial mount & AppState listener (sync when user returns from settings or watch app)
+  // Initial mount & AppState listener & periodic poll (sync while user is active on screen)
   useEffect(() => {
     synchronizeVitals();
 
@@ -178,8 +212,17 @@ export default function VitalsScreen() {
       }
     });
 
-    return () => sub.remove();
-  }, [synchronizeVitals]);
+    const interval = setInterval(() => {
+      if (AppState.currentState === 'active' && !isDemoModeActive) {
+        synchronizeVitals();
+      }
+    }, 30000);
+
+    return () => {
+      sub.remove();
+      clearInterval(interval);
+    };
+  }, [synchronizeVitals, isDemoModeActive]);
 
   // Handle permission request
   const handleRequestPermissions = async () => {

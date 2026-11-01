@@ -96,12 +96,19 @@ export function validateMeasurement(metricType, value, config = vitalsConfig) {
     if (typeof value !== 'object' || value === null) {
       return { isValid: false, reason: 'Blood pressure must be an object with systolic and diastolic' };
     }
-    const { systolic, diastolic } = value;
+    let { systolic, diastolic } = value;
+    if (typeof systolic === 'string') systolic = parseFloat(systolic);
+    if (typeof diastolic === 'string') diastolic = parseFloat(diastolic);
     if (typeof systolic !== 'number' || isNaN(systolic) || typeof diastolic !== 'number' || isNaN(diastolic)) {
       return { isValid: false, reason: 'Blood pressure values must be valid numbers' };
     }
     if (systolic <= 0 || diastolic <= 0) {
       return { isValid: false, reason: 'Blood pressure values cannot be zero or negative' };
+    }
+    // Handle kPa normalization if values are in kPa range (< 40 kPa)
+    if (systolic < 40 && diastolic < 30 && systolic > 0) {
+      systolic = Math.round(systolic * 7.50062);
+      diastolic = Math.round(diastolic * 7.50062);
     }
     if (systolic < metricRules.systolic.minPlausible || systolic > metricRules.systolic.maxPlausible) {
       return { isValid: false, reason: `Systolic value (${systolic}) outside plausible range` };
@@ -112,16 +119,22 @@ export function validateMeasurement(metricType, value, config = vitalsConfig) {
     if (systolic <= diastolic) {
       return { isValid: false, reason: `Systolic (${systolic}) must be greater than diastolic (${diastolic})` };
     }
-    return { isValid: true };
+    return { isValid: true, numericValue: { systolic, diastolic } };
   }
 
-  const numVal = Number(value);
+  let numVal = typeof value === 'string' ? parseFloat(value.replace(/[^0-9.]/g, '')) : Number(value);
   if (isNaN(numVal)) {
     return { isValid: false, reason: 'Value is not a valid number' };
   }
   if (numVal <= 0) {
     return { isValid: false, reason: 'Value must be greater than zero' };
   }
+
+  // Handle SpO2 fractional representation (e.g., 0.86 or 0.98 -> 86% or 98%)
+  if (metricType === 'spo2' && numVal <= 1.0) {
+    numVal = Math.round(numVal * 100);
+  }
+
   if (numVal < metricRules.minPlausible || numVal > metricRules.maxPlausible) {
     return { isValid: false, reason: `Value (${numVal}) outside plausible human range (${metricRules.minPlausible}-${metricRules.maxPlausible})` };
   }
@@ -145,10 +158,50 @@ export function normalizeReading({
   const now = Date.now();
   const freshness = calculateFreshness(timeMs, now);
 
+  let normalizedValue = value;
+  let normalizedUnit = unit || vitalsConfig.metrics[metricType]?.unit || '';
+
+  if (metricType === 'spo2') {
+    let numVal = typeof value === 'string' ? parseFloat(value.replace(/[^0-9.]/g, '')) : Number(value);
+    if (!isNaN(numVal) && numVal > 0) {
+      if (numVal <= 1.0 || String(unit).toLowerCase() === 'fraction') {
+        numVal = Math.round(numVal * 100);
+      }
+      normalizedValue = numVal;
+      normalizedUnit = '%';
+    }
+  } else if (metricType === 'heartRate' || metricType === 'restingHeartRate') {
+    let numVal = typeof value === 'string' ? parseFloat(value.replace(/[^0-9.]/g, '')) : Number(value);
+    if (!isNaN(numVal) && numVal > 0) {
+      if (String(unit).toLowerCase() === 'hz') {
+        numVal = Math.round(numVal * 60);
+      }
+      normalizedValue = Math.round(numVal);
+      normalizedUnit = 'BPM';
+    }
+  } else if (metricType === 'respiratoryRate') {
+    let numVal = typeof value === 'string' ? parseFloat(value.replace(/[^0-9.]/g, '')) : Number(value);
+    if (!isNaN(numVal) && numVal > 0) {
+      normalizedValue = Math.round(numVal);
+      normalizedUnit = 'breaths/min';
+    }
+  } else if (metricType === 'bloodPressure' && typeof value === 'object' && value !== null) {
+    let sys = typeof value.systolic === 'string' ? parseFloat(value.systolic) : Number(value.systolic);
+    let dia = typeof value.diastolic === 'string' ? parseFloat(value.diastolic) : Number(value.diastolic);
+    if (!isNaN(sys) && !isNaN(dia)) {
+      if (String(unit).toLowerCase() === 'kpa' || (sys < 40 && dia < 30 && sys > 0)) {
+        sys = Math.round(sys * 7.50062);
+        dia = Math.round(dia * 7.50062);
+      }
+      normalizedValue = { systolic: Math.round(sys), diastolic: Math.round(dia) };
+      normalizedUnit = 'mmHg';
+    }
+  }
+
   return {
     metricType,
-    value,
-    unit: unit || vitalsConfig.metrics[metricType]?.unit || '',
+    value: normalizedValue,
+    unit: normalizedUnit,
     timestamp: timeMs,
     isoTime: new Date(timeMs).toISOString(),
     source: String(source || 'Health Connect'),
@@ -258,6 +311,7 @@ export function evaluateReading(reading, history = [], options = {}) {
 
     // For real readings: enforce consecutive readings requirement
     const requiredConsecutive = config.consecutiveReadingsRequired || 2;
+    const skipConfirmation = options.skipConsecutiveConfirmation || requiredConsecutive <= 1 || Boolean(reading.skipConsecutiveConfirmation);
     const recentWindowStart = now - config.emergencyMaxAgeMs;
 
     // Filter recent prior readings for this metric within the emergency window
@@ -268,7 +322,7 @@ export function evaluateReading(reading, history = [], options = {}) {
     // Count how many consecutive recent readings are abnormal (ATTENTION or CRITICAL)
     const abnormalCount = countRecentAbnormalReadings([reading, ...recentHistory], metricType, rules);
 
-    if (abnormalCount < requiredConsecutive) {
+    if (!skipConfirmation && abnormalCount < requiredConsecutive) {
       return {
         status: VITALS_STATUS.ATTENTION,
         reason: 'UNCONFIRMED_CRITICAL_EVENT',
@@ -426,7 +480,7 @@ function countRecentAbnormalReadings(readings, metricType, rules) {
  */
 export function evaluateVitalsSnapshot(vitalsMap = {}, historyMap = {}, options = {}) {
   const evaluations = {};
-  let overallStatus = VITALS_STATUS.NORMAL;
+  let overallStatus = null;
   let criticalCandidate = null;
   let activeMetricCount = 0;
 
@@ -445,11 +499,15 @@ export function evaluateVitalsSnapshot(vitalsMap = {}, historyMap = {}, options 
     const evaluation = evaluateReading(reading, history, options);
     evaluations[metricType] = evaluation;
 
-    const currentIdx = severityOrder.indexOf(overallStatus);
-    const evalIdx = severityOrder.indexOf(evaluation.status);
-
-    if (evalIdx > currentIdx) {
+    if (!overallStatus) {
       overallStatus = evaluation.status;
+    } else {
+      const currentIdx = severityOrder.indexOf(overallStatus);
+      const evalIdx = severityOrder.indexOf(evaluation.status);
+
+      if (evalIdx > currentIdx) {
+        overallStatus = evaluation.status;
+      }
     }
 
     if (evaluation.status === VITALS_STATUS.CRITICAL && evaluation.canTriggerSos) {
@@ -460,7 +518,7 @@ export function evaluateVitalsSnapshot(vitalsMap = {}, historyMap = {}, options 
   }
 
   return {
-    overallStatus: activeMetricCount === 0 ? VITALS_STATUS.UNKNOWN : overallStatus,
+    overallStatus: activeMetricCount === 0 ? VITALS_STATUS.UNKNOWN : (overallStatus || VITALS_STATUS.UNKNOWN),
     activeMetricCount,
     evaluations,
     criticalCandidate,

@@ -288,6 +288,13 @@ export async function fetchLatestVitals(options = {}) {
   if (!native) {
     return {
       vitals: {},
+      history: {
+        heartRate: [],
+        spo2: [],
+        bloodPressure: [],
+        respiratoryRate: [],
+        restingHeartRate: [],
+      },
       sources: [],
       lastSyncTime: Date.now(),
       error: isExpoGo ? 'EXPO_GO_DEV_BUILD_REQUIRED' : 'UNSUPPORTED_PLATFORM',
@@ -303,39 +310,53 @@ export async function fetchLatestVitals(options = {}) {
   };
 
   const results = {};
+  const historyMap = {
+    heartRate: [],
+    spo2: [],
+    bloodPressure: [],
+    respiratoryRate: [],
+    restingHeartRate: [],
+  };
   const sourcesSet = new Set();
 
   // 1. Heart Rate
   try {
     const hrResult = await native.readRecords('HeartRate', { timeRangeFilter });
     if (hrResult?.records && hrResult.records.length > 0) {
-      // Find latest sample
-      let latestSample = null;
-      let latestRecord = null;
+      const allSamples = [];
       for (const rec of hrResult.records) {
+        const sourceName = formatDataSource(rec?.metadata?.dataOrigin);
+        if (sourceName) sourcesSet.add(sourceName);
         if (rec.samples && rec.samples.length > 0) {
           for (const s of rec.samples) {
-            const sampleTime = new Date(s.time).getTime();
-            if (!latestSample || sampleTime > new Date(latestSample.time).getTime()) {
-              latestSample = s;
-              latestRecord = rec;
+            if (s.beatsPerMinute > 0) {
+              allSamples.push({
+                sample: s,
+                record: rec,
+                sourceName,
+                timeMs: new Date(s.time).getTime(),
+              });
             }
           }
         }
       }
 
-      if (latestSample && latestSample.beatsPerMinute > 0) {
-        const sourceName = formatDataSource(latestRecord?.metadata?.dataOrigin);
-        sourcesSet.add(sourceName);
-        results.heartRate = normalizeReading({
+      // Sort newest to oldest
+      allSamples.sort((a, b) => b.timeMs - a.timeMs);
+
+      if (allSamples.length > 0) {
+        const normalized = allSamples.map(item => normalizeReading({
           metricType: 'heartRate',
-          value: latestSample.beatsPerMinute,
+          value: item.sample.beatsPerMinute,
           unit: 'BPM',
-          timestamp: latestSample.time,
-          source: sourceName,
-          metadata: latestRecord?.metadata || {},
+          timestamp: item.sample.time,
+          source: item.sourceName,
+          metadata: item.record?.metadata || {},
           isDemo: false,
-        });
+        }));
+
+        results.heartRate = normalized[0];
+        historyMap.heartRate = normalized.slice(1);
       }
     }
   } catch (err) {
@@ -346,24 +367,31 @@ export async function fetchLatestVitals(options = {}) {
   try {
     const spo2Result = await native.readRecords('OxygenSaturation', { timeRangeFilter });
     if (spo2Result?.records && spo2Result.records.length > 0) {
-      // Sort reverse chronological
       const sorted = [...spo2Result.records].sort(
         (a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()
       );
-      const latest = sorted[0];
-      const val = typeof latest.percentage === 'object' ? latest.percentage.value : latest.percentage;
-      if (typeof val === 'number' && val > 0) {
-        const sourceName = formatDataSource(latest.metadata?.dataOrigin);
-        sourcesSet.add(sourceName);
-        results.spo2 = normalizeReading({
-          metricType: 'spo2',
-          value: val,
-          unit: '%',
-          timestamp: latest.time,
-          source: sourceName,
-          metadata: latest.metadata || {},
-          isDemo: false,
-        });
+      const validRecords = [];
+      for (const rec of sorted) {
+        let val = typeof rec.percentage === 'object' ? rec.percentage.value : rec.percentage;
+        if (typeof val === 'number' && val > 0) {
+          // Normalize fraction to percent
+          if (val <= 1.0) val = Math.round(val * 100);
+          const sourceName = formatDataSource(rec.metadata?.dataOrigin);
+          sourcesSet.add(sourceName);
+          validRecords.push(normalizeReading({
+            metricType: 'spo2',
+            value: val,
+            unit: '%',
+            timestamp: rec.time,
+            source: sourceName,
+            metadata: rec.metadata || {},
+            isDemo: false,
+          }));
+        }
+      }
+      if (validRecords.length > 0) {
+        results.spo2 = validRecords[0];
+        historyMap.spo2 = validRecords.slice(1);
       }
     }
   } catch (err) {
@@ -377,21 +405,27 @@ export async function fetchLatestVitals(options = {}) {
       const sorted = [...bpResult.records].sort(
         (a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()
       );
-      const latest = sorted[0];
-      const sys = latest.systolic?.inMillimetersOfMercury ?? latest.systolic;
-      const dia = latest.diastolic?.inMillimetersOfMercury ?? latest.diastolic;
-      if (typeof sys === 'number' && typeof dia === 'number' && sys > 0 && dia > 0) {
-        const sourceName = formatDataSource(latest.metadata?.dataOrigin);
-        sourcesSet.add(sourceName);
-        results.bloodPressure = normalizeReading({
-          metricType: 'bloodPressure',
-          value: { systolic: Math.round(sys), diastolic: Math.round(dia) },
-          unit: 'mmHg',
-          timestamp: latest.time,
-          source: sourceName,
-          metadata: latest.metadata || {},
-          isDemo: false,
-        });
+      const validRecords = [];
+      for (const rec of sorted) {
+        const sys = rec.systolic?.inMillimetersOfMercury ?? rec.systolic;
+        const dia = rec.diastolic?.inMillimetersOfMercury ?? rec.diastolic;
+        if (typeof sys === 'number' && typeof dia === 'number' && sys > 0 && dia > 0) {
+          const sourceName = formatDataSource(rec.metadata?.dataOrigin);
+          sourcesSet.add(sourceName);
+          validRecords.push(normalizeReading({
+            metricType: 'bloodPressure',
+            value: { systolic: Math.round(sys), diastolic: Math.round(dia) },
+            unit: 'mmHg',
+            timestamp: rec.time,
+            source: sourceName,
+            metadata: rec.metadata || {},
+            isDemo: false,
+          }));
+        }
+      }
+      if (validRecords.length > 0) {
+        results.bloodPressure = validRecords[0];
+        historyMap.bloodPressure = validRecords.slice(1);
       }
     }
   } catch (err) {
@@ -405,19 +439,25 @@ export async function fetchLatestVitals(options = {}) {
       const sorted = [...respResult.records].sort(
         (a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()
       );
-      const latest = sorted[0];
-      if (typeof latest.rate === 'number' && latest.rate > 0) {
-        const sourceName = formatDataSource(latest.metadata?.dataOrigin);
-        sourcesSet.add(sourceName);
-        results.respiratoryRate = normalizeReading({
-          metricType: 'respiratoryRate',
-          value: Math.round(latest.rate),
-          unit: 'breaths/min',
-          timestamp: latest.time,
-          source: sourceName,
-          metadata: latest.metadata || {},
-          isDemo: false,
-        });
+      const validRecords = [];
+      for (const rec of sorted) {
+        if (typeof rec.rate === 'number' && rec.rate > 0) {
+          const sourceName = formatDataSource(rec.metadata?.dataOrigin);
+          sourcesSet.add(sourceName);
+          validRecords.push(normalizeReading({
+            metricType: 'respiratoryRate',
+            value: Math.round(rec.rate),
+            unit: 'breaths/min',
+            timestamp: rec.time,
+            source: sourceName,
+            metadata: rec.metadata || {},
+            isDemo: false,
+          }));
+        }
+      }
+      if (validRecords.length > 0) {
+        results.respiratoryRate = validRecords[0];
+        historyMap.respiratoryRate = validRecords.slice(1);
       }
     }
   } catch (err) {
@@ -431,19 +471,25 @@ export async function fetchLatestVitals(options = {}) {
       const sorted = [...rhrResult.records].sort(
         (a, b) => new Date(b.time).getTime() - new Date(a.time).getTime()
       );
-      const latest = sorted[0];
-      if (typeof latest.beatsPerMinute === 'number' && latest.beatsPerMinute > 0) {
-        const sourceName = formatDataSource(latest.metadata?.dataOrigin);
-        sourcesSet.add(sourceName);
-        results.restingHeartRate = normalizeReading({
-          metricType: 'restingHeartRate',
-          value: Math.round(latest.beatsPerMinute),
-          unit: 'BPM',
-          timestamp: latest.time,
-          source: sourceName,
-          metadata: latest.metadata || {},
-          isDemo: false,
-        });
+      const validRecords = [];
+      for (const rec of sorted) {
+        if (typeof rec.beatsPerMinute === 'number' && rec.beatsPerMinute > 0) {
+          const sourceName = formatDataSource(rec.metadata?.dataOrigin);
+          sourcesSet.add(sourceName);
+          validRecords.push(normalizeReading({
+            metricType: 'restingHeartRate',
+            value: Math.round(rec.beatsPerMinute),
+            unit: 'BPM',
+            timestamp: rec.time,
+            source: sourceName,
+            metadata: rec.metadata || {},
+            isDemo: false,
+          }));
+        }
+      }
+      if (validRecords.length > 0) {
+        results.restingHeartRate = validRecords[0];
+        historyMap.restingHeartRate = validRecords.slice(1);
       }
     }
   } catch (err) {
@@ -452,6 +498,7 @@ export async function fetchLatestVitals(options = {}) {
 
   return {
     vitals: results,
+    history: historyMap,
     sources: Array.from(sourcesSet),
     lastSyncTime: Date.now(),
   };

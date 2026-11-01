@@ -136,7 +136,7 @@ export default function VitalsEmergencyModal({
             ? '[DEMO DATA] Simulated vitals alert cancelled by senior during countdown'
             : 'Vitals critical alert cancelled by senior during countdown (User indicated okay)',
           timestamp: serverTimestamp(),
-          provider: isDemo ? 'demo_isolated_simulator' : 'twilio_whatsapp',
+          provider: isDemo ? 'demo_isolated_simulator' : 'whatsgateway',
           sosDispatched: false,
         });
       }
@@ -157,14 +157,16 @@ export default function VitalsEmergencyModal({
     setStage('dispatching');
 
     try {
-      const metricInfo = criticalEvaluation?.reading
-        ? `${criticalEvaluation.reading.metricType}: ${JSON.stringify(criticalEvaluation.reading.value)} ${criticalEvaluation.reading.unit}`
+      const reading = criticalEvaluation?.reading;
+      const metricInfo = reading
+        ? `${reading.metricType}: ${typeof reading.value === 'object' ? `${reading.value.systolic}/${reading.value.diastolic}` : reading.value} ${reading.unit}`
         : null;
 
       const result = await sendSOS({
         reason: 'vitals_critical',
         isDemo: Boolean(isDemo),
         demoMetric: metricInfo,
+        vitalsDetail: metricInfo,
       });
 
       setSosResult(result);
@@ -389,29 +391,77 @@ export default function VitalsEmergencyModal({
                       </Text>
                     </View>
                   </View>
-                ) : isSandboxBlocked ? (
-                  // REAL SOS: SANDBOX MODE RESTRICTION
-                  <View style={styles.sandboxBox}>
-                    <View style={styles.sandboxHeader}>
-                      <Ionicons name="alert-circle" size={24} color={colors.crimson} style={{ marginRight: 8 }} />
-                      <Text style={[textStyle('heading', lang, colors.crimson), styles.sandboxTitle]}>
-                        {isHindi ? 'ट्विलियो सैंडबॉक्स मोड सक्रिय' : 'Twilio Sandbox Mode Active'}
+                ) : (
+                  // REAL SOS: PRODUCTION OUTCOME
+                  <View style={styles.prodOutcomeContainer}>
+                    {/* Status Header Box */}
+                    <View style={[
+                      styles.statusHeaderBox,
+                      sosResult?.ok ? styles.boxSuccess : styles.boxFailure,
+                    ]}>
+                      <View style={styles.statusHeaderRow}>
+                        <Ionicons
+                          name={sosResult?.ok ? 'checkmark-circle' : 'alert-circle'}
+                          size={24}
+                          color={sosResult?.ok ? colors.forest : colors.crimson}
+                          style={{ marginRight: 8 }}
+                        />
+                        <Text style={[
+                          textStyle('heading', lang, sosResult?.ok ? colors.forest : colors.crimson),
+                          styles.statusBoxTitle,
+                        ]}>
+                          {sosResult?.ok
+                            ? (isHindi ? 'व्हाट्सगेटवे: संदेश भेजने के लिए कतारबद्ध' : 'WhatsGateway: Alert Queued for Delivery')
+                            : isSandboxBlocked
+                            ? (isHindi ? 'ट्विलियो सैंडबॉक्स मोड सक्रिय' : 'Twilio Sandbox Mode Active')
+                            : (isHindi ? 'आपातकालीन अलर्ट प्रेषण सूचना' : 'Emergency Alert Dispatch Note')}
+                        </Text>
+                      </View>
+                      <Text style={[textStyle('body', lang, colors.ink), styles.statusBoxDesc]}>
+                        {sosResult?.ok
+                          ? (isHindi
+                              ? 'आपातकालीन सूचना व्हाट्सगेटवे द्वारा कतारबद्ध कर ली गई है। वास्तविक डिलीवरी नेटवर्क और प्राप्तकर्ता की उपलब्धता पर निर्भर करती है।'
+                              : 'Your emergency notification was accepted and queued by WhatsGateway. Real WhatsApp delivery depends on network and recipient availability.')
+                          : isSandboxBlocked
+                          ? (isHindi
+                              ? 'ट्विलियो सैंडबॉक्स स्वचालित कस्टम आपातकालीन संदेशों को ब्लॉक करता है। वास्तविक आपातकाल के लिए कृपया नीचे दिए गए हरे बटन से व्हाट्सएप खोलें।'
+                              : 'Twilio Sandbox blocks automated outbound broadcasts. For this emergency, please send the prefilled alert via WhatsApp below.')
+                          : (sosResult?.errorMessage || sosResult?.error || 'Could not complete automated dispatch. Please contact your guardians directly below.')}
                       </Text>
                     </View>
-                    <Text style={[textStyle('body', lang, colors.ink), styles.sandboxDesc]}>
-                      {isHindi
-                        ? 'ट्विलियो सैंडबॉक्स स्वचालित कस्टम आपातकालीन संदेशों को ब्लॉक करता है। वास्तविक आपातकाल के लिए कृपया नीचे दिए गए हरे बटन से व्हाट्सएप खोलें।'
-                        : 'Twilio Sandbox blocks automated outbound broadcasts. For this emergency, please send the prefilled alert via WhatsApp below.'}
-                    </Text>
 
-                    {/* Manual WhatsApp Fallback Cards */}
+                    {/* Location Summary if available */}
+                    {sosResult?.location && (
+                      <View style={styles.locationSummaryRow}>
+                        <Ionicons name="location" size={16} color={colors.primary} style={{ marginRight: 6 }} />
+                        <Text style={[textStyle('label', lang, colors.ink), styles.locationText]}>
+                          {sosResult.location.address || `GPS: ${sosResult.location.lat.toFixed(4)}, ${sosResult.location.lng.toFixed(4)}`}
+                        </Text>
+                      </View>
+                    )}
+
+                    {/* Manual WhatsApp Fallback / Contact Actions */}
                     <View style={styles.manualGuardiansContainer}>
                       <Text style={[textStyle('heading', lang, colors.ink), styles.manualHeading]}>
-                        {isHindi ? 'व्हाट्सएप द्वारा खुद भेजें' : 'Send via WhatsApp Yourself:'}
+                        {isHindi ? 'संरक्षक संपर्क स्थिति और बैकअप' : 'Registered Emergency Guardians:'}
                       </Text>
-                      {(sosResult?.fallbackGuardians || []).map((guardian, idx) => {
+                      <Text style={[textStyle('label', lang, colors.inkSoft), { fontSize: 11, marginBottom: 8 }]}>
+                        {isHindi
+                          ? 'यदि आवश्यक हो तो आप नीचे सीधे हरे व्हाट्सएप बटन से भी तुरंत संदेश भेज सकते हैं।'
+                          : 'You can also tap the green WhatsApp button below to send the alert directly.'}
+                      </Text>
+
+                      {(sosResult?.fallbackGuardians || sosResult?.contacts || []).map((guardian, idx) => {
                         const targetKey = guardian.id || guardian.phone || guardian.name;
-                        const status = manualStates[targetKey] || 'ready';
+                        const status = manualStates[targetKey] || (
+                          sosResult?.results?.find(r => r.name === guardian.name || r.phone === guardian.phone)?.status ||
+                          (sosResult?.ok ? 'QUEUED' : 'ready')
+                        );
+
+                        const isQueued = status === 'QUEUED' || status === 'ACCEPTED_BY_GATEWAY' || status === 'ACCEPTED';
+                        const isDelivered = status === 'DELIVERED';
+                        const isFailed = status === 'FAILED' || status === 'REJECTED';
+
                         return (
                           <View key={targetKey || idx} style={styles.guardianCard}>
                             <View style={styles.guardianInfo}>
@@ -419,48 +469,47 @@ export default function VitalsEmergencyModal({
                                 {guardian.name}
                               </Text>
                               <Text style={[textStyle('label', lang, colors.inkSoft), styles.guardianPhone]}>
-                                {guardian.phone} • {guardian.relation || 'Guardian'}
+                                {guardian.phone || guardian.rawPhone} • {guardian.relation || 'Guardian'}
                               </Text>
                               <View style={[
                                 styles.stateBadge,
+                                isQueued && styles.stateBadgeOpened,
+                                isDelivered && styles.safeguardBanner,
+                                isFailed && styles.stateBadgeFailed,
                                 status === 'opened' && styles.stateBadgeOpened,
                                 status === 'returned' && styles.stateBadgeReturned,
                               ]}>
                                 <Text style={styles.stateBadgeText}>
-                                  {status === 'ready'
-                                    ? 'Ready to send'
-                                    : status === 'opened'
+                                  {status === 'opened'
                                     ? 'WhatsApp opened'
-                                    : 'Returned • Not confirmed as sent'}
+                                    : status === 'returned'
+                                    ? 'Returned • Not confirmed'
+                                    : isDelivered
+                                    ? 'Delivered to device'
+                                    : isQueued
+                                    ? 'Enqueued for delivery'
+                                    : isFailed
+                                    ? 'Failed to queue'
+                                    : 'Ready to send'}
                                 </Text>
                               </View>
                             </View>
-                            <TouchableOpacity
-                              style={styles.waButton}
-                              onPress={() => handleOpenGuardianWhatsApp(guardian)}
-                              activeOpacity={0.85}
-                            >
-                              <Ionicons name="logo-whatsapp" size={20} color="#FFFFFF" style={{ marginRight: 6 }} />
-                              <Text style={styles.waButtonText}>
-                                {status === 'returned' ? 'Open Again' : 'Send'}
-                              </Text>
-                            </TouchableOpacity>
+                            {guardian.waLink && (
+                              <TouchableOpacity
+                                style={styles.waButton}
+                                onPress={() => handleOpenGuardianWhatsApp(guardian)}
+                                activeOpacity={0.85}
+                              >
+                                <Ionicons name="logo-whatsapp" size={18} color="#FFFFFF" style={{ marginRight: 4 }} />
+                                <Text style={styles.waButtonText}>
+                                  {status === 'returned' ? 'Open' : 'WhatsApp'}
+                                </Text>
+                              </TouchableOpacity>
+                            )}
                           </View>
                         );
                       })}
                     </View>
-                  </View>
-                ) : (
-                  // REAL SOS: PRODUCTION OUTCOME
-                  <View style={styles.prodResultBox}>
-                    <Text style={[textStyle('heading', lang, colors.ink), styles.resultHeaderTitle]}>
-                      {sosResult?.ok ? 'Emergency Alert Processed' : 'Alert Dispatch Note'}
-                    </Text>
-                    <Text style={[textStyle('body', lang, colors.inkSoft), styles.resultBodyText]}>
-                      {sosResult?.ok
-                        ? 'Your emergency notification was accepted for processing.'
-                        : (sosResult?.error || 'Could not dispatch automatic emergency notification.')}
-                    </Text>
                   </View>
                 )}
 
@@ -793,5 +842,51 @@ const styles = StyleSheet.create({
   },
   prodResultBox: {
     padding: spacing.md,
+  },
+  prodOutcomeContainer: {
+    paddingVertical: spacing.xs,
+  },
+  statusHeaderBox: {
+    borderRadius: radius.md,
+    padding: spacing.md,
+    borderWidth: 1,
+    marginBottom: spacing.sm,
+  },
+  boxSuccess: {
+    backgroundColor: '#F0FDF4',
+    borderColor: '#86EFAC',
+  },
+  boxFailure: {
+    backgroundColor: '#FEF2F2',
+    borderColor: '#FCA5A5',
+  },
+  statusHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: spacing.xs,
+  },
+  statusBoxTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    flex: 1,
+  },
+  statusBoxDesc: {
+    fontSize: 13,
+    lineHeight: 18,
+  },
+  locationSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: spacing.xs,
+    backgroundColor: colors.paperDeep,
+    borderRadius: radius.sm,
+    marginBottom: spacing.sm,
+  },
+  locationText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
+  stateBadgeFailed: {
+    backgroundColor: '#FEE2E2',
   },
 });

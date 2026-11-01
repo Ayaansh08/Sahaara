@@ -637,7 +637,7 @@ app.post('/api/whatsgateway/callback', async (req, res) => {
  */
 app.post('/api/sos', async (req, res) => {
   try {
-    const { reason = 'manual', location } = req.body;
+    const { reason = 'manual', location, vitalsDetail } = req.body;
 
     // 'test' is strictly removed; connectivity tests must use test-connectivity endpoints
     const allowedReasons = ['manual', 'fall', 'fall_ok', 'fall_help', 'fall_noresponse', 'vitals_critical'];
@@ -761,7 +761,9 @@ app.post('/api/sos', async (req, res) => {
         emergencyMessage = 'No response after a fall alert! Please call or check on them immediately.';
         break;
       case 'vitals_critical':
-        emergencyMessage = 'Critical health vitals alert detected from smartwatch! Please call or check on them immediately.';
+        emergencyMessage = vitalsDetail
+          ? `Critical health vitals alert detected from smartwatch (${String(vitalsDetail).trim()})! Please call or check on them immediately.`
+          : 'Critical health vitals alert detected from smartwatch! Please call or check on them immediately.';
         break;
     }
 

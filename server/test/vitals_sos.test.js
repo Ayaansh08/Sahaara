@@ -56,6 +56,10 @@ const {
   setCustomFirestoreDb,
 } = require('../services/authAndContactsService.js');
 
+const {
+  setGlobalGatewayFetch,
+} = require('../services/whatsGatewayService.js');
+
 const app = require('../index.js');
 
 let passedCount = 0;
@@ -548,6 +552,531 @@ async function runAllVitalsTests() {
       assert.strictEqual(resMalformed.status, 401);
       assert.strictEqual(resMalformed.body.errorCode, 'AUTH_HEADER_MALFORMED');
     } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // Helpers for tests 21-33
+  function makePostRequest(port, path, body, headers = {}) {
+    return new Promise((resolve, reject) => {
+      const postData = JSON.stringify(body);
+      const req = http.request(
+        {
+          hostname: '127.0.0.1',
+          port,
+          path,
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(postData),
+            ...headers,
+          },
+        },
+        (res) => {
+          let data = '';
+          res.on('data', (chunk) => (data += chunk));
+          res.on('end', () => {
+            let parsed;
+            try {
+              parsed = JSON.parse(data);
+            } catch (_) {
+              parsed = data;
+            }
+            resolve({ status: res.statusCode, body: parsed });
+          });
+        }
+      );
+      req.on('error', reject);
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  function createFakeDb() {
+    const data = new Map();
+    return {
+      collection: () => ({
+        add: async (doc) => {
+          const id = 'mock-alert-' + Date.now();
+          data.set(id, doc);
+          return { id };
+        },
+        doc: (id) => ({
+          set: async (doc, opts = {}) => {
+            const prev = data.get(id) || {};
+            const merged = opts.merge ? { ...prev, ...doc } : { ...prev, ...doc };
+            data.set(id, merged);
+            return { id };
+          },
+          update: async (fields) => {
+            const prev = data.get(id) || {};
+            data.set(id, { ...prev, ...fields });
+            return { id };
+          },
+          get: async () => ({ exists: () => data.has(id), data: () => data.get(id) }),
+        }),
+      }),
+    };
+  }
+
+  // 21. Normal readings do not trigger SOS (Case 1)
+  await runTest('21. Normal readings do not trigger SOS', () => {
+    const normalHr = normalizeReading({ metricType: 'heartRate', value: 72 });
+    const normalSpo2 = normalizeReading({ metricType: 'spo2', value: 98 });
+    const snapshot = evaluateVitalsSnapshot(
+      { heartRate: normalHr, spo2: normalSpo2 },
+      {},
+      { userOptedIn: true }
+    );
+    assert.strictEqual(snapshot.canTriggerSos, false);
+    assert.strictEqual(snapshot.overallStatus, VITALS_STATUS.NORMAL);
+  });
+
+  // 22. An abnormal reading meeting configured trigger criteria initiates the automatic SOS flow (Case 2)
+  await runTest('22. An abnormal reading meeting configured trigger criteria initiates automatic SOS flow', () => {
+    const now = Date.now();
+    const criticalHr = normalizeReading({ metricType: 'heartRate', value: 152, timestamp: now });
+    const priorHr = normalizeReading({ metricType: 'heartRate', value: 148, timestamp: now - 30000 });
+    const snapshot = evaluateVitalsSnapshot(
+      { heartRate: criticalHr },
+      { heartRate: [priorHr] },
+      { userOptedIn: true }
+    );
+    assert.strictEqual(snapshot.canTriggerSos, true);
+    assert.strictEqual(snapshot.overallStatus, VITALS_STATUS.CRITICAL);
+    assert.strictEqual(snapshot.criticalCandidate.reading.value, 152);
+  });
+
+  // 23. Readings in the wrong units are normalized or rejected correctly (Case 3)
+  await runTest('23. Readings in the wrong units are normalized or rejected correctly', () => {
+    // Fractional SpO2 (0.86) normalized to 86%
+    const fracSpo2 = normalizeReading({ metricType: 'spo2', value: 0.86, unit: 'fraction' });
+    assert.strictEqual(fracSpo2.value, 86);
+    assert.strictEqual(fracSpo2.unit, '%');
+    assert.strictEqual(validateMeasurement('spo2', 0.86).isValid, true);
+
+    // String with units ("152 BPM") parsed to number
+    const strHr = normalizeReading({ metricType: 'heartRate', value: '152 BPM' });
+    assert.strictEqual(strHr.value, 152);
+    assert.strictEqual(strHr.unit, 'BPM');
+
+    // BP in kPa (systolic: 16, diastolic: 10) normalized to mmHg (120/75 mmHg)
+    const kpaBp = normalizeReading({
+      metricType: 'bloodPressure',
+      value: { systolic: 16, diastolic: 10 },
+      unit: 'kPa',
+    });
+    assert.strictEqual(kpaBp.value.systolic, 120);
+    assert.strictEqual(kpaBp.value.diastolic, 75);
+    assert.strictEqual(kpaBp.unit, 'mmHg');
+
+    // Out of bounds / invalid units rejected
+    assert.strictEqual(validateMeasurement('heartRate', -10).isValid, false);
+    assert.strictEqual(validateMeasurement('heartRate', 300).isValid, false);
+    assert.strictEqual(validateMeasurement('spo2', 150).isValid, false);
+    assert.strictEqual(validateMeasurement('bloodPressure', { systolic: 80, diastolic: 90 }).isValid, false);
+  });
+
+  // 24. Missing and stale readings do not trigger SOS (Case 4)
+  await runTest('24. Missing and stale readings do not trigger SOS', () => {
+    // Missing readings
+    const emptySnapshot = evaluateVitalsSnapshot({}, {});
+    assert.strictEqual(emptySnapshot.canTriggerSos, false);
+    assert.strictEqual(emptySnapshot.overallStatus, VITALS_STATUS.UNKNOWN);
+
+    // Stale readings (> 5 minutes old)
+    const staleTime = Date.now() - 10 * 60 * 1000;
+    const staleHr = normalizeReading({ metricType: 'heartRate', value: 160, timestamp: staleTime });
+    const priorStale = normalizeReading({ metricType: 'heartRate', value: 155, timestamp: staleTime - 30000 });
+    const staleSnapshot = evaluateVitalsSnapshot(
+      { heartRate: staleHr },
+      { heartRate: [priorStale] },
+      { userOptedIn: true }
+    );
+    assert.strictEqual(staleSnapshot.canTriggerSos, false);
+    assert.strictEqual(staleSnapshot.overallStatus, VITALS_STATUS.STALE);
+  });
+
+  // 25. Demo/simulated readings never send real alerts (Case 5)
+  await runTest('25. Demo/simulated readings never send real alerts (isolated executor)', () => {
+    const demoReading = normalizeReading({
+      metricType: 'heartRate',
+      value: 152,
+      isDemo: true,
+    });
+    const evalDemo = evaluateReading(demoReading);
+    assert.strictEqual(evalDemo.isDemo, true);
+    assert.ok(evalDemo.message.startsWith('[DEMO DATA]'));
+  });
+
+  // 26. Automatic SOS respects user opt-in setting (Case 6)
+  await runTest('26. Automatic SOS respects user opt-in setting', () => {
+    const now = Date.now();
+    const criticalHr = normalizeReading({ metricType: 'heartRate', value: 152, timestamp: now });
+    const priorHr = normalizeReading({ metricType: 'heartRate', value: 148, timestamp: now - 30000 });
+    const snapshotOptOut = evaluateVitalsSnapshot(
+      { heartRate: criticalHr },
+      { heartRate: [priorHr] },
+      { userOptedIn: false }
+    );
+    assert.strictEqual(snapshotOptOut.canTriggerSos, false);
+    assert.strictEqual(snapshotOptOut.overallStatus, VITALS_STATUS.ATTENTION);
+    assert.strictEqual(snapshotOptOut.evaluations.heartRate.reason, 'USER_OPTED_OUT');
+  });
+
+  // 27. Expired or unavailable Firebase authentication is handled correctly (Case 7)
+  await runTest('27. Expired or unavailable Firebase authentication is handled correctly on /api/sos', async () => {
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+    try {
+      const res = await makePostRequest(port, '/api/sos', { reason: 'vitals_critical' });
+      assert.strictEqual(res.status, 401);
+      assert.strictEqual(res.body.errorCode, 'AUTH_HEADER_MISSING');
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 28. Automatic SOS uses the existing WhatsGateway backend service (Case 8)
+  await runTest('28. Automatic SOS uses the existing WhatsGateway backend service', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-api-key-vitals';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let gatewayCalled = false;
+    let gatewayBody = null;
+
+    setGlobalGatewayFetch(async (url, opts) => {
+      gatewayCalled = true;
+      gatewayBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          status: 'queued',
+          message_id: 'wg-vitals-test-01',
+          request_id: 'req-vitals-01',
+        }),
+      };
+    });
+
+    setTestMockContactsResolver(() => [
+      { name: 'Dr. Mehta', phone: '+919876543210', relation: 'Family Doctor' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'vitals_critical',
+          vitalsDetail: 'heartRate: 152 BPM',
+          location: { lat: 28.6139, lng: 77.2090, address: 'Connaught Place, New Delhi' },
+        },
+        {
+          'Authorization': 'Bearer mock-token-wg-vitals-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.ok, true);
+      assert.strictEqual(res.body.provider, 'whatsgateway');
+      assert.strictEqual(res.body.overallStatus, 'ACCEPTED_ALL');
+      assert.strictEqual(res.body.results[0].status, 'ACCEPTED_BY_GATEWAY');
+      assert.strictEqual(gatewayCalled, true);
+      assert.strictEqual(gatewayBody.to, '919876543210');
+      assert.ok(gatewayBody.message.includes('Critical health vitals alert detected'));
+      assert.ok(gatewayBody.message.includes('heartRate: 152 BPM'));
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 29. All registered guardians are attempted (Case 9)
+  await runTest('29. All registered guardians are attempted', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-api-key-guardians';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    const dispatchedRecipients = [];
+    setGlobalGatewayFetch(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      dispatchedRecipients.push(body.to);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          status: 'queued',
+          message_id: 'wg-guard-' + body.to,
+          request_id: 'req-' + body.to,
+        }),
+      };
+    });
+
+    setTestMockContactsResolver(() => [
+      { name: 'Son Rahul', phone: '+919876543211', relation: 'Son' },
+      { name: 'Daughter Priya', phone: '+919876543212', relation: 'Daughter' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        { reason: 'vitals_critical', vitalsDetail: 'spo2: 86%' },
+        {
+          'Authorization': 'Bearer mock-token-multi-guardian-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.totalContacts, 2);
+      assert.strictEqual(res.body.acceptedCount, 2);
+      assert.strictEqual(dispatchedRecipients.length, 2);
+      assert.ok(dispatchedRecipients.includes('919876543211'));
+      assert.ok(dispatchedRecipients.includes('919876543212'));
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 30. Repeated abnormal readings do not generate duplicate SOS events (Case 10)
+  await runTest('30. Repeated abnormal readings do not generate duplicate SOS events (rate limit enforced)', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-api-key-rate';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    setGlobalGatewayFetch(async () => ({
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        ok: true,
+        status: 'queued',
+        message_id: 'msg-01',
+      }),
+    }));
+
+    setTestMockContactsResolver(() => [
+      { name: 'Guardian', phone: '+919876543210', relation: 'Family' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const authHeader = {
+        'Authorization': 'Bearer mock-token-debounce-vitals-user',
+        'x-test-auth-mock': 'true',
+      };
+
+      // Call 1: Success
+      const res1 = await makePostRequest(port, '/api/sos', { reason: 'vitals_critical' }, authHeader);
+      assert.strictEqual(res1.status, 200);
+
+      // Call 2: Immediate repeat -> 429 Rate Limit
+      const res2 = await makePostRequest(port, '/api/sos', { reason: 'vitals_critical' }, authHeader);
+      assert.strictEqual(res2.status, 429);
+      assert.ok(res2.body.error.includes('Rate limit exceeded'));
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 31. A failure for one guardian does not prevent attempts to other guardians (Case 11)
+  await runTest('31. A failure for one guardian does not prevent attempts to other guardians', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-api-key-partial';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    setGlobalGatewayFetch(async (url, opts) => {
+      const body = JSON.parse(opts.body);
+      if (body.to === '919876543211') {
+        return {
+          ok: false,
+          status: 500,
+          text: async () => JSON.stringify({ ok: false, error: 'Simulated carrier outage' }),
+        };
+      }
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({ ok: true, status: 'queued', message_id: 'msg-success' }),
+      };
+    });
+
+    setTestMockContactsResolver(() => [
+      { name: 'Failing Guardian', phone: '+919876543211', relation: 'Contact 1' },
+      { name: 'Succeeding Guardian', phone: '+919876543212', relation: 'Contact 2' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        { reason: 'vitals_critical' },
+        {
+          'Authorization': 'Bearer mock-token-partial-fail-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.overallStatus, 'PARTIALLY_ACCEPTED');
+      assert.strictEqual(res.body.acceptedCount, 1);
+      assert.strictEqual(res.body.totalContacts, 2);
+      assert.strictEqual(res.body.results[0].status, 'FAILED');
+      assert.strictEqual(res.body.results[1].status, 'ACCEPTED_BY_GATEWAY');
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 32. A failed gateway request is recorded accurately (Case 12)
+  await runTest('32. A failed gateway request is recorded accurately', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-api-key-fail';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    setGlobalGatewayFetch(async () => ({
+      ok: false,
+      status: 502,
+      text: async () => JSON.stringify({ ok: false, error: 'Bad Gateway' }),
+    }));
+
+    setTestMockContactsResolver(() => [
+      { name: 'Guardian', phone: '+919876543210', relation: 'Family' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        { reason: 'vitals_critical' },
+        {
+          'Authorization': 'Bearer mock-token-failed-gateway-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.overallStatus, 'FAILED');
+      assert.strictEqual(res.body.acceptedCount, 0);
+      assert.strictEqual(res.body.results[0].status, 'FAILED');
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
+      await new Promise((resolve) => server.close(resolve));
+    }
+  });
+
+  // 33. Manual SOS continues to work unchanged (Case 13)
+  await runTest('33. Manual SOS continues to work unchanged via WhatsGateway', async () => {
+    const origProvider = process.env.WHATSAPP_PROVIDER;
+    const origKey = process.env.WHATSAPP_GATEWAY_API_KEY;
+    process.env.WHATSAPP_PROVIDER = 'whatsgateway';
+    process.env.WHATSAPP_GATEWAY_API_KEY = 'test-api-key-manual';
+
+    const server = http.createServer(app);
+    await new Promise((resolve) => server.listen(0, resolve));
+    const port = server.address().port;
+
+    let manualBody = null;
+    setGlobalGatewayFetch(async (url, opts) => {
+      manualBody = JSON.parse(opts.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () => JSON.stringify({
+          ok: true,
+          status: 'queued',
+          message_id: 'msg-manual-01',
+        }),
+      };
+    });
+
+    setTestMockContactsResolver(() => [
+      { name: 'Daughter Sneha', phone: '+919876543210', relation: 'Daughter' },
+    ]);
+    setCustomFirestoreDb(createFakeDb());
+
+    try {
+      const res = await makePostRequest(
+        port,
+        '/api/sos',
+        {
+          reason: 'manual',
+          location: { lat: 28.6139, lng: 77.2090, address: 'India Gate, New Delhi' },
+        },
+        {
+          'Authorization': 'Bearer mock-token-manual-sos-user',
+          'x-test-auth-mock': 'true',
+        }
+      );
+
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.overallStatus, 'ACCEPTED_ALL');
+      assert.strictEqual(res.body.results[0].status, 'ACCEPTED_BY_GATEWAY');
+      assert.ok(manualBody.message.includes('Pressed the SOS button and needs immediate emergency assistance!'));
+    } finally {
+      process.env.WHATSAPP_PROVIDER = origProvider;
+      process.env.WHATSAPP_GATEWAY_API_KEY = origKey;
+      setGlobalGatewayFetch(null);
+      setTestMockContactsResolver(null);
+      setCustomFirestoreDb(null);
       await new Promise((resolve) => server.close(resolve));
     }
   });
